@@ -4,6 +4,16 @@ A lightweight web importer that downloads supported 3D model files on the server
 
 The importer runs as a separate service. It does not replace or modify Bambuddy.
 
+> **AI-created, personal-use project.** This project is made by AI. It was created for the maintainer's personal use and is shared publicly as-is. It is not a supported product, and there is no commitment to maintain it.
+
+## Project status and expectations
+
+- **AI-generated:** The project code and documentation are created by AI from human-provided direction. AI-generated software can contain mistakes, incomplete behaviour and unexpected bugs. Review it and use it at your own discretion.
+- **Personal use:** This project was built to solve a personal need, not as a commercial product or a service with a support obligation.
+- **Issues and recommendations:** Bug reports, questions, feature requests and recommendations are welcome, but there is no promise that they will receive a response, be investigated, fixed or implemented. Issues may remain open or be closed without action.
+- **Updates may stop:** Development and releases may pause or stop completely at any time, without notice. There is no release schedule, roadmap or guarantee of ongoing compatibility.
+- **Use at your own risk:** You are responsible for reviewing the code, securing your deployment and deciding whether the project is suitable for your setup. You may need to maintain or adapt your own fork if the project no longer receives updates.
+
 ## Features
 
 - Import public models from several sources without creating accounts on those source sites.
