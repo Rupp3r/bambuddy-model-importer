@@ -1,13 +1,13 @@
 # Bambuddy Model Importer
 
-A lightweight web application that downloads supported 3D model files on the server and uploads them directly to the Bambuddy library. The browser sends a model-page URL or direct download URL; the model file itself is fetched by the importer container, not by the phone or desktop browser.
+A lightweight web importer that downloads supported 3D model files on the server and uploads them directly to a Bambuddy library. The browser sends a model-page URL or direct download URL; the model file itself is fetched by the importer container, not by the phone or desktop browser.
 
 The importer runs as a separate service. It does not replace or modify Bambuddy.
 
 ## Features
 
-- Resolve public/free Printables model pages and list supported files.
-- Optional Thingiverse imports through its official API.
+- Import public models from several sources without creating accounts on those source sites.
+- Resolve supported model pages and list downloadable model files.
 - Import direct HTTPS links to supported model files.
 - Upload selected files to Bambuddy through its library API.
 - Password-protected web interface.
@@ -17,15 +17,29 @@ The importer runs as a separate service. It does not replace or modify Bambuddy.
 
 STL, 3MF, STEP, STP, OBJ and AMF.
 
-## Supported sources and access requirements
+## Sources that do not require an account
 
-| Source | Requirements |
+| Source | Accepted URL | What can be imported |
+|---|---|---|
+| [Printables](https://www.printables.com/) | Public/free model page | Public/free model files. Paid, Club-only or otherwise restricted files may not be downloadable anonymously. |
+| [NASA 3D Resources](https://science.nasa.gov/3d-resources/) | Folder or file page in the [official NASA 3D Resources GitHub repository](https://github.com/nasa/NASA-3D-Resources) | Supported printable files found in that repository folder. The GitHub API is used without a personal token. |
+| [NIH 3D](https://3d.nih.gov/) | Public entry page, e.g. `https://3d.nih.gov/entries/3DPX-000914` | Published submission files in supported formats. Uses the public entry and download endpoints; no API key or NIH account is needed. Each model has its own licence. |
+| [Smithsonian 3D](https://3d.si.edu/) | Public 3D object page | Public print-ready STL files exposed by the Smithsonian 3D API. Some objects do not have an STL download. Check the individual object's usage conditions before reuse. |
+| [Wikimedia Commons](https://commons.wikimedia.org/) | File page for a supported 3D file | Public STL, 3MF, STEP, STP, OBJ or AMF files. The file's licence and creator information are shown when the API provides them. |
+| [Internet Archive](https://archive.org/) | Archived Thingiverse item, e.g. `https://archive.org/details/thingiverse-123456` | Original model files in public Thingiverse archive snapshots. This is an archival copy, not a live or complete Thingiverse catalogue. The item's licence metadata is displayed when available. |
+| Direct file URL | Public HTTPS URL that directly downloads a supported file | Supported files from any host that does not require a login to fetch the file. A model-page URL is not a direct file URL. |
+
+These sources use public endpoints and do not require source-site accounts, cookies or personal API keys. Public access does not automatically mean unrestricted reuse. Review each model's licence, attribution and usage conditions before sharing or using it commercially.
+
+Printables' GraphQL API and several other sites' undocumented/public endpoints can change. Provider failures are reported by the importer and do not affect the other sources.
+
+### Optional account-gated source
+
+| Source | Requirement |
 |---|---|
-| Printables | Public/free files exposed through the site's GraphQL API. Paid or Club-restricted files may require an account, purchase or membership and may not be downloadable anonymously. |
-| Thingiverse | A Thingiverse App Token is required for the official API. |
-| Direct file URL | A public HTTPS URL that directly downloads a supported model file. A model-page URL is not a direct file URL. |
+| [Thingiverse](https://www.thingiverse.com/) live API | Requires a Thingiverse App Token. Obtaining one requires a Thingiverse developer account/app registration, so live Thingiverse API downloads are not part of the account-free integrations. Use the Internet Archive integration for available archived Thingiverse items. |
 
-Printables' GraphQL API is not a stable public developer contract and may change. File access remains subject to the source site's permissions and terms.
+Sites where the model page is public but the actual download requires a login, personal access token or membership are not described as account-free sources and are not enabled as such.
 
 ## How it works
 
@@ -65,20 +79,20 @@ The repository includes a generic `compose.yaml` for a Portainer Git Repository 
 |---|---|---|
 | `IMPORTER_IMAGE` | `ghcr.io/rupp3r/bambuddy-model-importer:latest` | Container image to deploy. Set this when using a fork or another registry. |
 | `IMPORTER_PORT` | `8097` | Host port mapped to the importer web interface. |
-| `THINGIVERSE_TOKEN` | Empty | Thingiverse App Token. |
+| `THINGIVERSE_TOKEN` | Empty | Thingiverse App Token for users who already have an eligible developer token. |
 | `MAX_DOWNLOAD_MB` | `512` | Maximum permitted download size in MiB. |
 
 ### Networking
 
 The stack uses its own default Compose network and does not hard-code an existing network name. Set `BAMBUDDY_URL` to an address reachable from the importer container.
 
-The Compose file includes a `host.docker.internal:host-gateway` mapping for Docker environments that support it. This can be used when Bambuddy's API is exposed on the Docker host. If Bambuddy runs in another container, connect the importer to a network that both containers can access, then use Bambuddy's service or container DNS name and API port in `BAMBUDDY_URL`. Configure any external network for your environment in Portainer; do not assume a network name from this example.
+The Compose file includes a `host.docker.internal:host-gateway` mapping for Docker environments that support it. This can be used when Bambuddy's API is exposed on the Docker host. If Bambuddy runs in another container, connect the importer to a network that both containers can access, then use Bambuddy's service or container DNS name and API port in `BAMBUDDY_URL`. Configure any external network for your environment in Portainer.
 
 Open the web interface at `http://<docker-host>:<IMPORTER_PORT>` (default: `http://<docker-host>:8097`).
 
 ### GHCR image
 
-GitHub Actions builds and publishes the container image to GitHub Container Registry when application source files are pushed to the `main` branch.
+GitHub Actions builds and publishes the container image to GitHub Container Registry when application source files or tests are pushed to the `main` branch.
 
 ```text
 ghcr.io/<owner-lowercase>/bambuddy-model-importer:latest
@@ -98,7 +112,7 @@ docker compose up -d
 
 ## Updating
 
-After a new image has been published, redeploy the stack in Portainer and ensure it pulls the latest image. For local Compose deployments:
+After a new image has been published, redeploy the stack in Portainer and ensure it pulls the latest image. For local Docker Compose deployments:
 
 ```bash
 docker compose pull
@@ -112,6 +126,7 @@ docker compose up -d
 - Use a dedicated Bambuddy API key with only the permissions needed to upload files to the library.
 - Do not commit `.env` files, API keys, access tokens or passwords.
 - The importer only accepts public HTTPS download URLs and rejects destinations that resolve to non-public IP addresses.
+- Model files and archives are untrusted input. Review imported models before printing them.
 
 ## Development
 
@@ -125,6 +140,12 @@ export BAMBUDDY_API_KEY=<api-key>
 export IMPORTER_PASSWORD=<local-password>
 
 uvicorn app:app --reload --host 0.0.0.0 --port 8000
+```
+
+Run the test suite with:
+
+```bash
+python -m unittest discover -s tests -v
 ```
 
 The health endpoint is available at `/health`.
