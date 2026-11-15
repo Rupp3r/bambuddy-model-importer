@@ -1,80 +1,130 @@
-# Bambuddy Model Importer (Portainer + GitHub)
+# Bambuddy Model Importer
 
-This package is prepared for Portainer's **Git repository Stack** deployment. Portainer pulls a prebuilt image from GitHub Container Registry (GHCR); it does not need to build the Dockerfile itself. The source repository contains a GitHub Actions workflow that builds and publishes the image whenever the app source changes.
+A lightweight web application that downloads supported 3D model files on the server and uploads them directly to the Bambuddy library. The browser sends a model-page URL or direct download URL; the model file itself is fetched by the importer container, not by the phone or desktop browser.
 
-The importer is a separate container. It does not replace, rebuild, or modify the existing Bambuddy container.
+The importer runs as a separate service. It does not replace or modify Bambuddy.
 
-## What it imports
+## Features
 
-- **Printables:** public/free model files via the public GraphQL endpoint. It lists supported STL, 3MF, STEP, STP, OBJ and AMF files and lets you select one. Paid/Club-restricted files may not be anonymously downloadable.
-- **Thingiverse:** optional official API support. A Thingiverse App Token is required; without one, Thingiverse's official API will not provide file downloads.
-- **Other sources:** direct HTTPS URLs to a downloadable STL, 3MF, STEP, STP, OBJ or AMF file. A model-page URL from an unsupported host is not a direct download URL.
+- Resolve public/free Printables model pages and list supported files.
+- Optional Thingiverse imports through its official API.
+- Import direct HTTPS links to supported model files.
+- Upload selected files to Bambuddy through its library API.
+- Password-protected web interface.
+- Configurable maximum download size.
 
-The importer fetches the selected file on the server and sends it to Bambuddy's library API. It does not send the file through your phone or browser. Slice the imported geometry with the OrcaSlicer sidecar already configured in Bambuddy.
+### Supported file formats
 
-## Part 1 - Put the source on GitHub
+STL, 3MF, STEP, STP, OBJ and AMF.
 
-1. Create a **public** GitHub repository named `bambuddy-model-importer`.
-2. Upload the *contents* of this directory to the repository root. The `.github/workflows/publish-image.yml` file must remain in that exact path. Make sure hidden files (`.github`, `.dockerignore`, `.gitignore`) are included.
-3. Open the repository's **Actions** tab. The workflow named **Build and publish importer image** should run on the first push. Wait until it finishes successfully.
-4. Open your GitHub profile or organisation's **Packages** page, select `bambuddy-model-importer`, then open **Package settings** and change package visibility to **Public**. The repository can be public while the container package is private, so check this separately. A public GHCR package can be pulled by Portainer without registry credentials.
+## Supported sources and access requirements
 
-The published image name is:
-
-`ghcr.io/YOUR_GITHUB_USERNAME/bambuddy-model-importer:latest`
-
-Replace `YOUR_GITHUB_USERNAME` with the lowercase GitHub account or organisation name.
-
-## Part 2 - Create a Bambuddy API key
-
-In Bambuddy, open **Settings → API Keys** and create a key with **Manage Library** permission. Do not grant printer-control or other permissions. Copy the key; it is entered into Portainer and is not committed to GitHub.
-
-## Part 3 - Deploy in Portainer
-
-1. Open Portainer and select the Docker environment that runs Bambuddy.
-2. Open **Stacks → Add stack**.
-3. Name it `bambuddy-model-importer`.
-4. Choose **Git Repository** as the build method.
-5. Repository URL: `https://github.com/YOUR_GITHUB_USERNAME/bambuddy-model-importer`
-6. Reference: `refs/heads/main`
-7. Compose path: `compose.yaml`
-8. In **Environment variables**, add the values below. Do not put secrets into the Git repository.
-
-| Variable | Value |
+| Source | Requirements |
 |---|---|
-| `IMPORTER_IMAGE` | `ghcr.io/YOUR_GITHUB_USERNAME/bambuddy-model-importer:latest` |
-| `BAMBUDDY_URL` | `http://host.docker.internal:8756` |
-| `BAMBUDDY_API_KEY` | The API key created in Part 2 |
-| `IMPORTER_PASSWORD` | A long, unique password for the importer page |
-| `THINGIVERSE_TOKEN` | Leave blank for Printables-only, account-free imports |
-| `MAX_DOWNLOAD_MB` | `512` |
+| Printables | Public/free files exposed through the site's GraphQL API. Paid or Club-restricted files may require an account, purchase or membership and may not be downloadable anonymously. |
+| Thingiverse | A Thingiverse App Token is required for the official API. |
+| Direct file URL | A public HTTPS URL that directly downloads a supported model file. A model-page URL is not a direct file URL. |
 
-`BAMBUDDY_URL` above assumes the existing Bambuddy container uses `network_mode: host` and listens on port `8756`, as in the supplied setup. `host.docker.internal` is mapped to the Docker host by `extra_hosts` in the stack. Do not change the Bambuddy stack to deploy this importer.
+Printables' GraphQL API is not a stable public developer contract and may change. File access remains subject to the source site's permissions and terms.
 
-9. Click **Deploy the stack**. Portainer pulls the published image from GHCR.
+## How it works
 
-## Part 4 - Open it inside Bambuddy
+1. Open the importer web interface.
+2. Enter the importer password.
+3. Paste a supported model-page URL or a direct HTTPS file URL.
+4. Select a supported file when the source returns a file list.
+5. The importer downloads the file server-side and uploads it to Bambuddy's library API.
+6. Open the imported file in Bambuddy and use the slicer configured in that installation.
 
-In Bambuddy, open **Settings → External Links → Add Link** and enter:
+Importing a model does not automatically slice or start a print. Slicing and printer control remain within Bambuddy and any separately configured services.
 
-- Name: `Model Importer`
-- URL: `http://YOUR-DOCKER-HOST:8097`
-- Open in New Tab: off
+## Deploy with Portainer
 
-Use the host address that your phone can reach over your VPN. The importer page asks for the `IMPORTER_PASSWORD` set in Portainer. Paste a public/free Printables model URL, select a file, and import it. The file should then appear in Bambuddy's File Manager.
+The repository includes a generic `compose.yaml` for a Portainer Git Repository stack. It does not assume a particular Docker network, DNS server, host filesystem layout, time zone or private host configuration.
 
-Keep port 8097 reachable only from your trusted LAN/VPN. Do not forward it directly to the public internet.
+1. Confirm that the importer container will be able to reach your Bambuddy API endpoint.
+2. In Portainer, select the Docker environment where you want to deploy the importer.
+3. Go to **Stacks → Add stack** and select **Git Repository**.
+4. Repository URL: `https://github.com/<OWNER>/<REPOSITORY>`
+5. Reference: `refs/heads/main`
+6. Compose path: `compose.yaml`
+7. Add the required environment variables below.
+8. Deploy the stack.
 
-## Updating the importer
+### Required environment variables
 
-When you push a source-code change to GitHub, Actions rebuilds and publishes the `latest` image. After the workflow completes, open the stack in Portainer and choose **Pull and redeploy** (wording can vary by Portainer version). The Compose file sets `pull_policy: always`, so the current GHCR image is fetched during redeployment.
+| Variable | Description |
+|---|---|
+| `BAMBUDDY_URL` | Base URL of the Bambuddy API, reachable from the importer container. |
+| `BAMBUDDY_API_KEY` | Bambuddy API key with **Manage Library** permission. |
+| `IMPORTER_PASSWORD` | Long, unique password used to unlock the importer interface. |
 
-## OrcaSlicer sidecar reference
+### Optional environment variables
 
-`orca-slicer-api.compose.yml` is retained as a separate reference only. Do not deploy a second Orca sidecar if yours is already running. It includes the required `network_mode: gojira_default` and `dns: 8.8.8.8` settings.
+| Variable | Default | Description |
+|---|---|---|
+| `IMPORTER_IMAGE` | `ghcr.io/rupp3r/bambuddy-model-importer:latest` | Container image to deploy. Set this when using a fork or another registry. |
+| `IMPORTER_PORT` | `8097` | Host port mapped to the importer web interface. |
+| `THINGIVERSE_TOKEN` | Empty | Thingiverse App Token. |
+| `MAX_DOWNLOAD_MB` | `512` | Maximum permitted download size in MiB. |
 
-## Important limitations
+### Networking
 
-- Printables' GraphQL API is not a stable public developer contract and may change.
-- Thingiverse's official API requires a Thingiverse App Token. It cannot be honestly described as account-free.
-- Only public/free models that the source exposes anonymously can be fetched without logging in.
+The stack uses its own default Compose network and does not hard-code an existing network name. Set `BAMBUDDY_URL` to an address reachable from the importer container.
+
+The Compose file includes a `host.docker.internal:host-gateway` mapping for Docker environments that support it. This can be used when Bambuddy's API is exposed on the Docker host. If Bambuddy runs in another container, connect the importer to a network that both containers can access, then use Bambuddy's service or container DNS name and API port in `BAMBUDDY_URL`. Configure any external network for your environment in Portainer; do not assume a network name from this example.
+
+Open the web interface at `http://<docker-host>:<IMPORTER_PORT>` (default: `http://<docker-host>:8097`).
+
+### GHCR image
+
+GitHub Actions builds and publishes the container image to GitHub Container Registry when application source files are pushed to the `main` branch.
+
+```text
+ghcr.io/<owner-lowercase>/bambuddy-model-importer:latest
+```
+
+The workflow converts the repository owner's name to lowercase before creating the image tag. Repository visibility and GHCR package visibility are separate. Set the package to **Public** in GitHub Packages if the image should be pulled without registry credentials.
+
+## Deploy with Docker Compose
+
+1. Copy `.env.example` to `.env`.
+2. Set `BAMBUDDY_URL`, `BAMBUDDY_API_KEY` and `IMPORTER_PASSWORD`.
+3. Run:
+
+```bash
+docker compose up -d
+```
+
+## Updating
+
+After a new image has been published, redeploy the stack in Portainer and ensure it pulls the latest image. For local Compose deployments:
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+## Security
+
+- Restrict access to trusted users and networks, such as a private LAN or VPN.
+- Do not expose the importer directly to the public internet without an appropriate secure access layer.
+- Use a dedicated Bambuddy API key with only the permissions needed to upload files to the library.
+- Do not commit `.env` files, API keys, access tokens or passwords.
+- The importer only accepts public HTTPS download URLs and rejects destinations that resolve to non-public IP addresses.
+
+## Development
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+export BAMBUDDY_URL=http://<bambuddy-host>:<port>
+export BAMBUDDY_API_KEY=<api-key>
+export IMPORTER_PASSWORD=<local-password>
+
+uvicorn app:app --reload --host 0.0.0.0 --port 8000
+```
+
+The health endpoint is available at `/health`.

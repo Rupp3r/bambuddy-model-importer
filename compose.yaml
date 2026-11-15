@@ -1,19 +1,20 @@
 services:
   bambuddy-model-importer:
-    image: "${IMPORTER_IMAGE:?Set IMPORTER_IMAGE in Portainer}"
-    container_name: bambuddy-model-importer
+    image: "${IMPORTER_IMAGE:-ghcr.io/rupp3r/bambuddy-model-importer:latest}"
     restart: unless-stopped
     pull_policy: always
-    network_mode: gojira_default
-    dns:
-      - 8.8.8.8
+
     ports:
-      - "8097:8000"
+      - "${IMPORTER_PORT:-8097}:8000"
+
+    # Allows the container to reach services exposed on the Docker host.
+    # Remove this mapping if it is not needed in your environment.
     extra_hosts:
       - "host.docker.internal:host-gateway"
+
     environment:
-      BAMBUDDY_URL: "${BAMBUDDY_URL:-http://host.docker.internal:8756}"
-      BAMBUDDY_API_KEY: "${BAMBUDDY_API_KEY:?Set BAMBUDDY_API_KEY in Portainer}"
-      IMPORTER_PASSWORD: "${IMPORTER_PASSWORD:?Set IMPORTER_PASSWORD in Portainer}"
+      BAMBUDDY_URL: "${BAMBUDDY_URL:?Set BAMBUDDY_URL to a reachable Bambuddy API URL}"
+      BAMBUDDY_API_KEY: "${BAMBUDDY_API_KEY:?Set BAMBUDDY_API_KEY}"
+      IMPORTER_PASSWORD: "${IMPORTER_PASSWORD:?Set IMPORTER_PASSWORD}"
       THINGIVERSE_TOKEN: "${THINGIVERSE_TOKEN:-}"
       MAX_DOWNLOAD_MB: "${MAX_DOWNLOAD_MB:-512}"
