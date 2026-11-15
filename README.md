@@ -53,16 +53,6 @@ In Bambuddy, open **Settings → API Keys** and create a key with **Manage Libra
 
 9. Click **Deploy the stack**. Portainer pulls the published image from GHCR.
 
-The importer service intentionally retains your network settings:
-
-```yaml
-network_mode: gojira_default
-dns:
-  - 8.8.8.8
-```
-
-The Docker network `gojira_default` must already exist in this Docker environment.
-
 ## Part 4 - Open it inside Bambuddy
 
 In Bambuddy, open **Settings → External Links → Add Link** and enter:
