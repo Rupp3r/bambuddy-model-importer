@@ -26,6 +26,7 @@ MAX_DOWNLOAD_BYTES = int(os.environ.get("MAX_DOWNLOAD_MB", "512")) * 1024 * 1024
 PRINTABLES_API = "https://api.printables.com/graphql/"
 THINGIVERSE_API = "https://api.thingiverse.com"
 NASA_API = "https://science.nasa.gov/wp-json/wp/v2/topic"
+NASA_TAGS_API = "https://science.nasa.gov/wp-json/wp/v2/tags"
 NIH_API = "https://3d.nih.gov/api/entries"
 SMITHSONIAN_3D_API = "https://3d-api.si.edu/api/v1.0/content/file/search"
 WIKIMEDIA_API = "https://commons.wikimedia.org/w/api.php"
@@ -55,10 +56,22 @@ class DirectImportRequest(BaseModel):
     url: str = Field(min_length=8, max_length=2048)
 
 
+class ImportSelection(BaseModel):
+    file_id: str = Field(min_length=1, max_length=2048)
+    file_type: str | None = None
+    filename: str = Field(min_length=1, max_length=255)
+
+
+class BatchImportRequest(BaseModel):
+    url: str = Field(min_length=8, max_length=2048)
+    files: list[ImportSelection] = Field(min_length=1, max_length=100)
+
+
 PRINTABLES_FILES_QUERY = """
 query ModelFiles($id: ID!) {
   model: print(id: $id) {
     id name slug premium price
+    tags { name }
     stls { id name fileSize folder note filePreviewPath }
     gcodes { id name fileSize folder note filePreviewPath }
     slas { id name fileSize folder note filePreviewPath }
@@ -178,21 +191,179 @@ async def download_public_file(url: str) -> bytes:
     raise HTTPException(502, "Too many redirects while downloading the model.")
 
 
-async def bambuddy_upload(filename: str, payload: bytes, source_url: str) -> dict:
+
+def normalize_source_tags(*values) -> list[str]:
+    """Normalize tag-like values returned by model providers."""
+    found: list[str] = []
+    seen: set[str] = set()
+
+    def visit(value):
+        if value is None or isinstance(value, (bool, int)):
+            return
+        if isinstance(value, dict):
+            for key in ("name", "label", "title", "value", "keyword", "term"):
+                item = value.get(key)
+                if isinstance(item, str):
+                    visit(item)
+                    return
+            for key in ("tags", "keywords", "subjects", "subject", "categories", "terms"):
+                if key in value:
+                    visit(value[key])
+            return
+        if isinstance(value, (list, tuple, set)):
+            for item in value:
+                visit(item)
+            return
+        if not isinstance(value, str):
+            return
+        name = re.sub(r"\s+", " ", value).strip().strip(" \t\r\n,;")
+        if not name or name.isdigit():
+            return
+        name = name[:64].rstrip()
+        key = name.casefold()
+        if key not in seen:
+            seen.add(key)
+            found.append(name)
+
+    for value in values:
+        visit(value)
+    return found[:40]
+
+
+def safe_folder_name(value: str) -> str:
+    """Turn a source model title into one safe Bambuddy folder name."""
+    invalid = '<>:"/\\|?*'
+    name = "".join(" " if char in invalid or ord(char) < 32 else char for char in str(value or "Imported model"))
+    name = re.sub(r"\s+", " ", name).strip(" .")
+    if not name or name in {".", ".."}:
+        name = "Imported model"
+    return name[:120].rstrip(" .") or "Imported model"
+
+async def bambuddy_request(method: str, path: str, **kwargs) -> httpx.Response:
     if not BAMBUDDY_API_KEY:
         raise HTTPException(503, "BAMBUDDY_API_KEY is missing from the importer .env file.")
-    endpoint = f"{BAMBUDDY_URL}/api/v1/library/files"
-    headers = {"X-API-Key": BAMBUDDY_API_KEY}
-    timeout = httpx.Timeout(180, connect=20)
+    headers = kwargs.pop("headers", {})
+    headers["X-API-Key"] = BAMBUDDY_API_KEY
+    timeout = kwargs.pop("timeout", httpx.Timeout(90, connect=20))
+    url = f"{BAMBUDDY_URL}/api/v1/{path.lstrip('/')}"
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(
-                endpoint,
-                headers=headers,
-                files={"file": (filename, payload, "application/octet-stream")},
-            )
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            return await client.request(method, url, headers=headers, **kwargs)
     except httpx.HTTPError as exc:
         raise HTTPException(502, f"Could not connect to Bambuddy at {BAMBUDDY_URL}: {exc}") from exc
+
+
+async def create_bambuddy_folder(name: str) -> int:
+    response = await bambuddy_request(
+        "POST",
+        "/library/folders",
+        json={"name": safe_folder_name(name)},
+    )
+    if response.status_code >= 400:
+        try:
+            detail = response.json().get("detail", response.text)
+        except Exception:
+            detail = response.text
+        raise HTTPException(response.status_code, f"Bambuddy could not create the model folder: {detail}")
+    try:
+        folder = response.json()
+        folder_id = int(folder["id"])
+    except (ValueError, KeyError, TypeError) as exc:
+        raise HTTPException(502, "Bambuddy returned an invalid folder response.") from exc
+    return folder_id
+
+
+async def apply_bambuddy_tags(file_ids: list[int], source_tags: list[str]) -> list[str]:
+    """Create missing source tags and assign them to the newly imported files."""
+    tags = normalize_source_tags(source_tags)
+    file_ids = sorted({int(file_id) for file_id in file_ids if file_id is not None})
+    if not tags or not file_ids:
+        return []
+
+    listed = await bambuddy_request("GET", "/library/tags/")
+    if listed.status_code >= 400:
+        try:
+            detail = listed.json().get("detail", listed.text)
+        except Exception:
+            detail = listed.text
+        raise HTTPException(listed.status_code, f"Bambuddy could not list library tags: {detail}")
+    try:
+        existing = listed.json()
+    except ValueError as exc:
+        raise HTTPException(502, "Bambuddy returned an invalid tag list.") from exc
+    if not isinstance(existing, list):
+        raise HTTPException(502, "Bambuddy returned an unexpected tag list.")
+
+    by_key = {
+        str(item.get("name", "")).strip().casefold(): int(item["id"])
+        for item in existing
+        if isinstance(item, dict) and item.get("name") and item.get("id") is not None
+    }
+    tag_ids: list[int] = []
+    applied_names: list[str] = []
+    for name in tags:
+        key = name.casefold()
+        tag_id = by_key.get(key)
+        if tag_id is None:
+            created = await bambuddy_request("POST", "/library/tags/", json={"name": name})
+            if created.status_code == 409:
+                # Another import may have created this tag between GET and POST.
+                refreshed = await bambuddy_request("GET", "/library/tags/")
+                if refreshed.status_code >= 400:
+                    continue
+                try:
+                    current_tags = refreshed.json()
+                except ValueError:
+                    continue
+                tag_id = next(
+                    (
+                        int(item["id"])
+                        for item in current_tags
+                        if isinstance(item, dict)
+                        and str(item.get("name", "")).strip().casefold() == key
+                        and item.get("id") is not None
+                    ),
+                    None,
+                )
+            elif created.status_code < 400:
+                try:
+                    payload = created.json()
+                    tag_id = int(payload["id"])
+                except (ValueError, KeyError, TypeError):
+                    tag_id = None
+            else:
+                continue
+        if tag_id is not None:
+            tag_ids.append(tag_id)
+            applied_names.append(name)
+
+    if not tag_ids:
+        return []
+    assigned = await bambuddy_request(
+        "POST",
+        "/library/tags/bulk-assign",
+        json={"file_ids": file_ids, "tag_ids": sorted(set(tag_ids)), "action": "add"},
+    )
+    if assigned.status_code >= 400:
+        try:
+            detail = assigned.json().get("detail", assigned.text)
+        except Exception:
+            detail = assigned.text
+        raise HTTPException(assigned.status_code, f"Bambuddy could not assign source tags: {detail}")
+    return applied_names
+
+
+async def bambuddy_upload(filename: str, payload: bytes, source_url: str, folder_id: int | None = None) -> dict:
+    if not BAMBUDDY_API_KEY:
+        raise HTTPException(503, "BAMBUDDY_API_KEY is missing from the importer .env file.")
+    params = {"folder_id": folder_id} if folder_id is not None else None
+    response = await bambuddy_request(
+        "POST",
+        "/library/files/",
+        params=params,
+        timeout=httpx.Timeout(180, connect=20),
+        files={"file": (filename, payload, "application/octet-stream")},
+    )
     if response.status_code >= 400:
         try:
             detail = response.json().get("detail", response.text)
@@ -205,7 +376,6 @@ async def bambuddy_upload(filename: str, payload: bytes, source_url: str) -> dic
         raise HTTPException(502, "Bambuddy returned a non-JSON upload response.") from exc
     result["source_url"] = source_url
     return result
-
 
 async def printables_graphql(query: str, variables: dict) -> dict:
     timeout = httpx.Timeout(45, connect=15)
@@ -261,12 +431,13 @@ async def resolve_printables(url: str) -> dict:
         "model_id": model_id,
         "title": model.get("name") or f"Printables model {model_id}",
         "url": url,
+        "tags": normalize_source_tags(model.get("tags")),
         "paid_or_club": is_paid,
         "files": files,
     }
 
 
-async def import_printables(url: str, file_id: str, file_type: str, filename: str) -> dict:
+async def import_printables(url: str, file_id: str, file_type: str, filename: str, folder_id: int | None = None) -> dict:
     model_id = parse_printables_id(url)
     if not model_id:
         raise HTTPException(400, "Invalid Printables model URL.")
@@ -288,7 +459,7 @@ async def import_printables(url: str, file_id: str, file_type: str, filename: st
     payload = await download_public_file(download_url)
     if file_name.lower().endswith(".3mf") and not payload.startswith(b"PK\x03\x04"):
         raise HTTPException(400, "The downloaded .3mf was not a valid ZIP/3MF container.")
-    return await bambuddy_upload(file_name, payload, url)
+    return await bambuddy_upload(file_name, payload, url, folder_id=folder_id)
 
 
 async def resolve_thingiverse(url: str) -> dict:
@@ -332,10 +503,17 @@ async def resolve_thingiverse(url: str) -> dict:
     for option in options:
         item = next(x for x in raw_files if str(x.get("id", "")) == option["id"])
         option["download_url"] = item.get("public_url") or item.get("download_url")
-    return {"source": "Thingiverse", "model_id": thing_id, "title": thing.get("name") or f"Thing {thing_id}", "url": url, "files": options}
+    return {
+        "source": "Thingiverse",
+        "model_id": thing_id,
+        "title": thing.get("name") or f"Thing {thing_id}",
+        "url": url,
+        "tags": normalize_source_tags(thing.get("tags"), thing.get("tags_string"), thing.get("category")),
+        "files": options,
+    }
 
 
-async def import_thingiverse(url: str, file_id: str, filename: str) -> dict:
+async def import_thingiverse(url: str, file_id: str, filename: str, folder_id: int | None = None) -> dict:
     resolved = await resolve_thingiverse(url)
     selected = next((f for f in resolved["files"] if f["id"] == str(file_id)), None)
     if not selected:
@@ -344,7 +522,7 @@ async def import_thingiverse(url: str, file_id: str, filename: str) -> dict:
     payload = await download_public_file(selected["download_url"])
     if file_name.lower().endswith(".3mf") and not payload.startswith(b"PK\x03\x04"):
         raise HTTPException(400, "The downloaded .3mf was not a valid ZIP/3MF container.")
-    return await bambuddy_upload(file_name, payload, url)
+    return await bambuddy_upload(file_name, payload, url, folder_id=folder_id)
 
 
 
@@ -436,7 +614,7 @@ async def resolve_nasa_github(url: str) -> dict:
     }
 
 
-async def import_nasa_github(url: str, file_id: str, filename: str) -> dict:
+async def import_nasa_github(url: str, file_id: str, filename: str, folder_id: int | None = None) -> dict:
     resolved = await resolve_nasa_github(url)
     selected = next((f for f in resolved["files"] if f["id"] == file_id and f["kind"] == "nasa_github"), None)
     if not selected:
@@ -445,7 +623,7 @@ async def import_nasa_github(url: str, file_id: str, filename: str) -> dict:
     payload = await download_public_file(selected["download_url"])
     if file_name.lower().endswith(".3mf") and not payload.startswith(b"PK\x03\x04"):
         raise HTTPException(400, "The downloaded .3mf was not a valid ZIP/3MF container.")
-    return await bambuddy_upload(file_name, payload, url)
+    return await bambuddy_upload(file_name, payload, url, folder_id=folder_id)
 
 
 def parse_nasa_slug(url: str) -> str | None:
@@ -468,7 +646,7 @@ async def resolve_nasa(url: str) -> dict:
         "parent": "447593",
         "slug": slug,
         "per_page": 1,
-        "_fields": "id,slug,link,title,excerpt,content,featured_image_url,date,modified",
+        "_fields": "id,slug,link,title,excerpt,content,featured_image_url,date,modified,tags",
     }
     data = await external_json(NASA_API, params=params)
     if isinstance(data, list):
@@ -486,6 +664,21 @@ async def resolve_nasa(url: str) -> dict:
             urls.add(candidate)
     if not urls:
         raise HTTPException(404, "No directly downloadable STL, 3MF, STEP, OBJ or AMF files were found on this NASA page.")
+    raw_nasa_tags = item.get("tags") or []
+    nasa_tag_names = []
+    numeric_tag_ids = [str(value) for value in raw_nasa_tags if str(value).isdigit()]
+    if numeric_tag_ids:
+        try:
+            tag_rows = await external_json(
+                NASA_TAGS_API,
+                params={"include": ",".join(numeric_tag_ids[:100]), "per_page": 100, "_fields": "id,name"},
+            )
+            if isinstance(tag_rows, list):
+                nasa_tag_names = [row.get("name") for row in tag_rows if isinstance(row, dict)]
+        except HTTPException:
+            nasa_tag_names = []
+    else:
+        nasa_tag_names = raw_nasa_tags
     files = []
     for file_url in sorted(urls):
         filename = unquote(PurePosixPath(urlparse(file_url).path).name)
@@ -501,11 +694,12 @@ async def resolve_nasa(url: str) -> dict:
         "model_id": str(item.get("id", slug)),
         "title": _strip_html((item.get("title") or {}).get("rendered")) or slug,
         "url": url,
+        "tags": normalize_source_tags(nasa_tag_names),
         "files": files,
     }
 
 
-async def import_nasa(url: str, file_id: str, filename: str) -> dict:
+async def import_nasa(url: str, file_id: str, filename: str, folder_id: int | None = None) -> dict:
     resolved = await resolve_nasa(url)
     selected = next((f for f in resolved["files"] if f["id"] == file_id and f["kind"] == "nasa"), None)
     if not selected:
@@ -514,7 +708,7 @@ async def import_nasa(url: str, file_id: str, filename: str) -> dict:
     payload = await download_public_file(selected["id"])
     if file_name.lower().endswith(".3mf") and not payload.startswith(b"PK\x03\x04"):
         raise HTTPException(400, "The downloaded .3mf was not a valid ZIP/3MF container.")
-    return await bambuddy_upload(file_name, payload, url)
+    return await bambuddy_upload(file_name, payload, url, folder_id=folder_id)
 
 
 def parse_nih_id(url: str) -> str | None:
@@ -588,11 +782,12 @@ async def resolve_nih(url: str) -> dict:
         "model_id": canonical_id,
         "title": str(meta.get("title") or f"NIH 3D {canonical_id}"),
         "url": url,
+        "tags": normalize_source_tags(meta.get("tags"), meta.get("keywords"), meta.get("subjects"), meta.get("subject")),
         "files": files,
     }
 
 
-async def import_nih(url: str, file_id: str, filename: str) -> dict:
+async def import_nih(url: str, file_id: str, filename: str, folder_id: int | None = None) -> dict:
     resolved = await resolve_nih(url)
     selected = next((item for item in resolved["files"] if item["id"] == file_id and item["kind"] == "nih"), None)
     if not selected:
@@ -601,7 +796,7 @@ async def import_nih(url: str, file_id: str, filename: str) -> dict:
     payload = await download_public_file(selected["id"])
     if file_name.lower().endswith(".3mf") and not payload.startswith(b"PK\x03\x04"):
         raise HTTPException(400, "The downloaded .3mf was not a valid ZIP/3MF container.")
-    return await bambuddy_upload(file_name, payload, url)
+    return await bambuddy_upload(file_name, payload, url, folder_id=folder_id)
 
 
 def parse_smithsonian_id(url: str) -> str | None:
@@ -665,11 +860,16 @@ async def resolve_smithsonian(url: str) -> dict:
         "model_id": model_id,
         "title": title,
         "url": url,
+        "tags": normalize_source_tags(
+            [row.get("tags") for row in rows],
+            [row.get("categories") for row in rows],
+            [(row.get("content") or {}).get("tags") for row in rows],
+        ),
         "files": files,
     }
 
 
-async def import_smithsonian(url: str, file_id: str, filename: str) -> dict:
+async def import_smithsonian(url: str, file_id: str, filename: str, folder_id: int | None = None) -> dict:
     resolved = await resolve_smithsonian(url)
     selected = next((f for f in resolved["files"] if f["id"] == file_id and f["kind"] == "smithsonian_stl"), None)
     if not selected:
@@ -698,7 +898,7 @@ async def import_smithsonian(url: str, file_id: str, filename: str) -> dict:
                     mesh_data = archive.read(info)
                     if len(mesh_data) != info.file_size:
                         raise HTTPException(400, "The Smithsonian archive contains an incomplete STL file.")
-                    imported.append(await bambuddy_upload(mesh_name, mesh_data, url))
+                    imported.append(await bambuddy_upload(mesh_name, mesh_data, url, folder_id=folder_id))
         except zipfile.BadZipFile as exc:
             raise HTTPException(400, "The Smithsonian model archive is not a valid ZIP file.") from exc
         return {
@@ -707,7 +907,7 @@ async def import_smithsonian(url: str, file_id: str, filename: str) -> dict:
             "source_url": url,
         }
     mesh_name = safe_filename(filename or selected["name"])
-    return await bambuddy_upload(mesh_name, payload, url)
+    return await bambuddy_upload(mesh_name, payload, url, folder_id=folder_id)
 
 
 
@@ -772,10 +972,11 @@ async def resolve_archive(url: str) -> dict:
         "files": raw_files,
         "creator": str(creator),
         "license": license_name,
+        "tags": normalize_source_tags(meta.get("subject"), meta.get("keywords"), meta.get("tags")),
     }
 
 
-async def import_archive(url: str, file_id: str, filename: str) -> dict:
+async def import_archive(url: str, file_id: str, filename: str, folder_id: int | None = None) -> dict:
     resolved = await resolve_archive(url)
     selected = next((f for f in resolved["files"] if f["id"] == file_id and f["kind"] == "archive"), None)
     if not selected:
@@ -807,7 +1008,7 @@ async def import_archive(url: str, file_id: str, filename: str) -> dict:
                         raise HTTPException(400, "The archive contains an incomplete model file.")
                     if mesh_name.lower().endswith(".3mf") and not mesh_data.startswith(b"PK\x03\x04"):
                         continue
-                    imported.append(await bambuddy_upload(mesh_name, mesh_data, url))
+                    imported.append(await bambuddy_upload(mesh_name, mesh_data, url, folder_id=folder_id))
         except zipfile.BadZipFile as exc:
             raise HTTPException(400, "The Internet Archive model archive is not a valid ZIP file.") from exc
         if not imported:
@@ -820,7 +1021,7 @@ async def import_archive(url: str, file_id: str, filename: str) -> dict:
     mesh_name = safe_filename(filename or file_id)
     if mesh_name.lower().endswith(".3mf") and not payload.startswith(b"PK\x03\x04"):
         raise HTTPException(400, "The downloaded .3mf was not a valid ZIP/3MF container.")
-    return await bambuddy_upload(mesh_name, payload, url)
+    return await bambuddy_upload(mesh_name, payload, url, folder_id=folder_id)
 
 
 def parse_wikimedia_title(url: str) -> str | None:
@@ -846,8 +1047,10 @@ async def resolve_wikimedia(url: str) -> dict:
             "action": "query",
             "format": "json",
             "formatversion": 2,
-            "prop": "imageinfo",
+            "prop": "imageinfo|categories",
             "iiprop": "url|extmetadata",
+            "cllimit": 50,
+            "clshow": "!hidden",
             "titles": f"File:{file_title}",
         },
         user_agent="BambuddyModelImporter/1.0 (https://github.com/Rupp3r/bambuddy-model-importer)",
@@ -881,6 +1084,11 @@ async def resolve_wikimedia(url: str) -> dict:
         "model_id": page.get("title") or file_title,
         "title": page.get("title") or file_title,
         "url": url,
+        "tags": normalize_source_tags([
+            str(category.get("title", "")).removeprefix("Category:")
+            for category in (page.get("categories") or [])
+            if isinstance(category, dict)
+        ]),
         "files": [{
             "id": direct_url,
             "kind": "wikimedia",
@@ -891,7 +1099,7 @@ async def resolve_wikimedia(url: str) -> dict:
     }
 
 
-async def import_wikimedia(url: str, file_id: str, filename: str) -> dict:
+async def import_wikimedia(url: str, file_id: str, filename: str, folder_id: int | None = None) -> dict:
     resolved = await resolve_wikimedia(url)
     selected = next((f for f in resolved["files"] if f["id"] == file_id and f["kind"] == "wikimedia"), None)
     if not selected:
@@ -900,8 +1108,184 @@ async def import_wikimedia(url: str, file_id: str, filename: str) -> dict:
     payload = await download_public_file(selected["id"])
     if file_name.lower().endswith(".3mf") and not payload.startswith(b"PK\x03\x04"):
         raise HTTPException(400, "The downloaded .3mf was not a valid ZIP/3MF container.")
-    return await bambuddy_upload(file_name, payload, url)
+    return await bambuddy_upload(file_name, payload, url, folder_id=folder_id)
 
+
+
+
+async def resolve_model_source(url: str) -> dict:
+    """Resolve one supported model page while retaining server-side download URLs."""
+    if parse_printables_id(url):
+        return await resolve_printables(url)
+    if parse_thingiverse_id(url):
+        return await resolve_thingiverse(url)
+    if parse_nasa_github_folder(url):
+        return await resolve_nasa_github(url)
+    if parse_nasa_slug(url):
+        return await resolve_nasa(url)
+    if parse_nih_id(url):
+        return await resolve_nih(url)
+    if parse_smithsonian_id(url):
+        return await resolve_smithsonian(url)
+    if parse_archive_id(url):
+        return await resolve_archive(url)
+    if parse_wikimedia_title(url):
+        return await resolve_wikimedia(url)
+    parsed = urlparse(url)
+    suffix = PurePosixPath(parsed.path).suffix.lower()
+    if suffix in ALLOWED_EXTENSIONS:
+        return {
+            "source": "Direct file URL",
+            "title": PurePosixPath(parsed.path).name,
+            "url": url,
+            "tags": [],
+            "files": [{"id": "direct", "kind": "direct", "name": PurePosixPath(parsed.path).name, "size": None}],
+        }
+    raise HTTPException(
+        400,
+        "Supported inputs: public Printables, NASA 3D Resources, NIH 3D, Smithsonian 3D, Wikimedia Commons and Internet Archive model pages; Thingiverse pages with an optional App Token; or direct HTTPS model-file URLs.",
+    )
+
+
+def public_model_response(resolved: dict) -> dict:
+    """Remove server-only download URLs and archive internals before returning to the browser."""
+    response = dict(resolved)
+    response["files"] = []
+    for item in resolved.get("files") or []:
+        public_item = dict(item)
+        public_item.pop("download_url", None)
+        public_item.pop("archive", None)
+        response["files"].append(public_item)
+    return response
+
+
+async def import_resolved_file(url: str, selected: dict, folder_id: int | None) -> dict:
+    file_id = str(selected["id"])
+    filename = safe_filename(selected["name"])
+    kind = str(selected.get("kind") or "")
+    if parse_printables_id(url):
+        return await import_printables(url, file_id, kind, filename, folder_id=folder_id)
+    if parse_thingiverse_id(url):
+        return await import_thingiverse(url, file_id, filename, folder_id=folder_id)
+    if parse_nasa_github_folder(url):
+        return await import_nasa_github(url, file_id, filename, folder_id=folder_id)
+    if parse_nasa_slug(url):
+        return await import_nasa(url, file_id, filename, folder_id=folder_id)
+    if parse_nih_id(url):
+        return await import_nih(url, file_id, filename, folder_id=folder_id)
+    if parse_smithsonian_id(url):
+        return await import_smithsonian(url, file_id, filename, folder_id=folder_id)
+    if parse_archive_id(url):
+        return await import_archive(url, file_id, filename, folder_id=folder_id)
+    if parse_wikimedia_title(url):
+        return await import_wikimedia(url, file_id, filename, folder_id=folder_id)
+    raise HTTPException(400, "This URL is not a supported model page. Use the direct-file import field for direct downloads.")
+
+
+def uploaded_file_ids(results: list[dict]) -> list[int]:
+    found = []
+    for result in results:
+        nested = result.get("imported_files")
+        items = nested if isinstance(nested, list) else [result]
+        for item in items:
+            if isinstance(item, dict) and item.get("id") is not None:
+                try:
+                    found.append(int(item["id"]))
+                except (TypeError, ValueError):
+                    continue
+    return sorted(set(found))
+
+
+
+def needs_model_folder(url: str, selected_files: list[dict]) -> bool:
+    if len(selected_files) > 1:
+        return True
+    return (
+        len(selected_files) == 1
+        and str(selected_files[0].get("name", "")).lower().endswith(".zip")
+        and bool(parse_smithsonian_id(url) or parse_archive_id(url))
+    )
+
+
+async def run_model_import(url: str, selections: list[ImportSelection]) -> dict:
+    resolved = await resolve_model_source(url)
+    if resolved.get("source") == "Direct file URL":
+        raise HTTPException(400, "Use the direct-file import field for direct HTTPS file URLs.")
+
+    selected_files = []
+    seen = set()
+    for selection in selections:
+        file_type = selection.file_type
+        match = next(
+            (
+                item for item in (resolved.get("files") or [])
+                if str(item.get("id")) == str(selection.file_id)
+                and (file_type is None or str(item.get("kind")) == str(file_type))
+            ),
+            None,
+        )
+        if match is None:
+            raise HTTPException(400, f"The selected file {selection.filename!r} does not belong to this model page.")
+        key = (str(match["id"]), str(match.get("kind") or ""))
+        if key not in seen:
+            seen.add(key)
+            selected_files.append(match)
+    if not selected_files:
+        raise HTTPException(400, "Select at least one file to import.")
+
+    # All selected files from the same URL stay together; supported source ZIPs
+    # also get a folder when one archive expands into multiple model meshes.
+    folder_id = None
+    folder_name = None
+    if needs_model_folder(url, selected_files):
+        folder_name = safe_folder_name(str(resolved.get("title") or "Imported model"))
+        folder_id = await create_bambuddy_folder(folder_name)
+
+    imported_results = []
+    flattened_files = []
+    failures = []
+    for selected in selected_files:
+        try:
+            result = await import_resolved_file(url, selected, folder_id)
+            imported_results.append(result)
+            nested = result.get("imported_files")
+            if isinstance(nested, list):
+                flattened_files.extend(item for item in nested if isinstance(item, dict))
+            else:
+                flattened_files.append(result)
+        except HTTPException as exc:
+            failures.append({
+                "filename": selected.get("name"),
+                "status": exc.status_code,
+                "error": str(exc.detail),
+            })
+        except Exception as exc:
+            failures.append({
+                "filename": selected.get("name"),
+                "status": 500,
+                "error": f"Unexpected import error: {exc.__class__.__name__}",
+            })
+
+    file_ids = uploaded_file_ids(imported_results)
+    tags_assigned = []
+    tag_warning = None
+    if file_ids and resolved.get("tags"):
+        try:
+            tags_assigned = await apply_bambuddy_tags(file_ids, resolved.get("tags") or [])
+        except HTTPException as exc:
+            tag_warning = str(exc.detail)
+
+    return {
+        "source": resolved.get("source"),
+        "title": resolved.get("title"),
+        "source_url": url,
+        "folder": {"id": folder_id, "name": folder_name} if folder_id is not None else None,
+        "files_imported": len(flattened_files),
+        "imported_files": flattened_files,
+        "failed_files": failures,
+        "tags_assigned": tags_assigned,
+        "tag_warning": tag_warning,
+    }
 
 
 @app.get("/health")
@@ -917,34 +1301,8 @@ async def index() -> str:
 @app.post("/api/resolve")
 async def api_resolve(body: ResolveRequest, x_importer_password: str | None = Header(default=None)) -> dict:
     check_password(x_importer_password)
-    if parse_printables_id(body.url):
-        return await resolve_printables(body.url)
-    if parse_thingiverse_id(body.url):
-        result = await resolve_thingiverse(body.url)
-        for item in result["files"]:
-            item.pop("download_url", None)
-        return result
-    if parse_nasa_github_folder(body.url):
-        result = await resolve_nasa_github(body.url)
-        for item in result["files"]:
-            item.pop("download_url", None)
-        return result
-    if parse_nasa_slug(body.url):
-        return await resolve_nasa(body.url)
-    if parse_nih_id(body.url):
-        return await resolve_nih(body.url)
-    if parse_smithsonian_id(body.url):
-        return await resolve_smithsonian(body.url)
-    if parse_archive_id(body.url):
-        return await resolve_archive(body.url)
-    if parse_wikimedia_title(body.url):
-        return await resolve_wikimedia(body.url)
-    parsed = urlparse(body.url)
-    suffix = PurePosixPath(parsed.path).suffix.lower()
-    if suffix in ALLOWED_EXTENSIONS:
-        return {"source": "Direct file URL", "title": PurePosixPath(parsed.path).name, "url": body.url,
-                "files": [{"id": "direct", "kind": "direct", "name": PurePosixPath(parsed.path).name, "size": None}]}
-    raise HTTPException(400, "Supported inputs: public Printables, NASA 3D Resources, NIH 3D, Smithsonian 3D and Wikimedia Commons model pages; Thingiverse pages with an optional App Token; or direct HTTPS model-file URLs.")
+    resolved = await resolve_model_source(body.url)
+    return public_model_response(resolved)
 
 
 @app.post("/api/import")
@@ -952,27 +1310,16 @@ async def api_import(body: ImportRequest, x_importer_password: str | None = Head
     check_password(x_importer_password)
     if not body.file_id or not body.filename:
         raise HTTPException(400, "Missing selected file details.")
-    if parse_printables_id(body.url):
-        if not body.file_type:
-            raise HTTPException(400, "Missing selected Printables file type.")
-        result = await import_printables(body.url, body.file_id, body.file_type, body.filename)
-    elif parse_thingiverse_id(body.url):
-        result = await import_thingiverse(body.url, body.file_id, body.filename)
-    elif parse_nasa_github_folder(body.url):
-        result = await import_nasa_github(body.url, body.file_id, body.filename)
-    elif parse_nasa_slug(body.url):
-        result = await import_nasa(body.url, body.file_id, body.filename)
-    elif parse_nih_id(body.url):
-        result = await import_nih(body.url, body.file_id, body.filename)
-    elif parse_smithsonian_id(body.url):
-        result = await import_smithsonian(body.url, body.file_id, body.filename)
-    elif parse_archive_id(body.url):
-        result = await import_archive(body.url, body.file_id, body.filename)
-    elif parse_wikimedia_title(body.url):
-        result = await import_wikimedia(body.url, body.file_id, body.filename)
-    else:
-        raise HTTPException(400, "Use the direct file URL import endpoint for direct-download URLs.")
-    return result
+    return await run_model_import(
+        body.url,
+        [ImportSelection(file_id=body.file_id, file_type=body.file_type, filename=body.filename)],
+    )
+
+
+@app.post("/api/import-batch")
+async def api_import_batch(body: BatchImportRequest, x_importer_password: str | None = Header(default=None)) -> dict:
+    check_password(x_importer_password)
+    return await run_model_import(body.url, body.files)
 
 
 @app.post("/api/import-direct")
@@ -997,14 +1344,27 @@ HTML = r'''<!doctype html>
 main{max-width:850px;margin:0 auto;padding:22px 16px 48px}.head{display:flex;align-items:center;gap:12px;margin-bottom:22px}.mark{width:42px;height:42px;border-radius:12px;background:#14532d;display:grid;place-items:center;font-size:23px}
 h1{font-size:22px;margin:0}p{color:var(--muted);line-height:1.5}.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px;margin:14px 0}
 label{display:block;font-weight:600;font-size:14px;margin-bottom:7px}input{width:100%;padding:13px;border:1px solid #4b5563;border-radius:9px;background:#111827;color:var(--text);font:inherit;min-width:0}
-.row{display:flex;gap:9px}.row input{flex:1}button{border:0;border-radius:9px;padding:12px 16px;background:var(--accent);color:#052e16;font-weight:700;font:inherit;cursor:pointer;white-space:nowrap}button:disabled{opacity:.5;cursor:wait}.secondary{background:#374151;color:var(--text);border:1px solid #4b5563}.file{display:flex;align-items:center;justify-content:space-between;gap:16px;border-top:1px solid var(--line);padding:13px 0}.file:first-child{border-top:0}.file small{display:block;color:var(--muted);margin-top:3px;overflow-wrap:anywhere}.status{white-space:pre-wrap;padding:12px;border-radius:9px;background:#111827;color:#d1d5db;margin-top:12px;display:none}.status.error{color:#fecaca;border:1px solid #7f1d1d}.hint{font-size:13px}.hidden{display:none!important}.tag{color:#86efac;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.06em}
-@media(max-width:560px){.row{flex-direction:column}.row button{width:100%}.file{align-items:flex-start;flex-direction:column}.file button{width:100%}}
+.row{display:flex;gap:9px}.row input{flex:1}button{border:0;border-radius:9px;padding:12px 16px;background:var(--accent);color:#052e16;font-weight:700;font:inherit;cursor:pointer;white-space:nowrap}button:disabled{opacity:.5;cursor:wait}.secondary{background:#374151;color:var(--text);border:1px solid #4b5563}
+.file{display:flex;align-items:center;justify-content:flex-start;gap:12px;border-top:1px solid var(--line);padding:13px 0}.file:first-child{border-top:0}.file input[type=checkbox]{width:21px;height:21px;flex:0 0 auto;margin:0;accent-color:var(--accent)}.file-info{flex:1;min-width:0}.file small{display:block;color:var(--muted);margin-top:3px;overflow-wrap:anywhere}
+.file-actions{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:14px 0}.selection-count{color:var(--muted);font-size:13px;margin-left:10px}.tag-list{display:flex;gap:7px;flex-wrap:wrap;margin:12px 0}.tag-chip{font-size:12px;padding:4px 9px;border:1px solid #4b5563;background:#111827;border-radius:999px;color:#d1d5db}
+.status{white-space:pre-wrap;padding:12px;border-radius:9px;background:#111827;color:#d1d5db;margin-top:12px;display:none}.status.error{color:#fecaca;border:1px solid #7f1d1d}.hint{font-size:13px}.hidden{display:none!important}.tag{color:#86efac;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.06em}
+@media(max-width:560px){.row{flex-direction:column}.row button{width:100%}.file-actions{align-items:stretch;flex-direction:column}.file-actions button{width:100%}.selection-count{margin-left:0}.file{align-items:flex-start}}
 </style></head><body><main>
 <div class="head"><div class="mark">⬇</div><div><h1>Bambuddy Model Importer</h1><div class="hint" style="color:var(--muted)">Fetch a public model directly into your Bambuddy library</div></div></div>
 <section class="panel" id="loginPanel"><label for="password">Importer password</label><div class="row"><input id="password" type="password" autocomplete="current-password" placeholder="Password configured in .env"><button id="unlock">Unlock</button></div><div class="hint" style="color:var(--muted);margin-top:8px">The password is kept only in this browser tab. Your Bambuddy API key stays on the server.</div><div id="loginStatus" class="status"></div></section>
 <section id="mainPanel" class="hidden">
- <div class="panel"><label for="modelUrl">Model page URL</label><div class="row"><input id="modelUrl" type="url" placeholder="https://www.printables.com/model/..."><button id="resolve">Find files</button></div><p class="hint">No source-site account is needed for public/free Printables, NASA 3D Resources, NIH 3D, Smithsonian print-ready STL files, Wikimedia Commons and archived Thingiverse models on Internet Archive. Direct HTTPS model-file links also work. Thingiverse's live API still requires its own App Token.</p><div id="resolveStatus" class="status"></div></div>
- <div id="modelPanel" class="panel hidden"><div class="tag" id="source"></div><h2 id="modelTitle" style="font-size:19px;margin:7px 0"></h2><div id="fileList"></div></div>
+ <div class="panel"><label for="modelUrl">Model page URL</label><div class="row"><input id="modelUrl" type="url" placeholder="https://www.printables.com/model/..."><button id="resolve">Find files</button></div><p class="hint">No source-site account is needed for public/free Printables, NASA 3D Resources, NIH 3D, Smithsonian print-ready STL files, Wikimedia Commons and archived Thingiverse models on Internet Archive. Select several files below to group them in one Bambuddy subfolder. Source tags are imported automatically when available. Thingiverse's live API still requires its own App Token.</p><div id="resolveStatus" class="status"></div></div>
+ <div id="modelPanel" class="panel hidden">
+  <div class="tag" id="source"></div>
+  <h2 id="modelTitle" style="font-size:19px;margin:7px 0"></h2>
+  <div id="sourceTags" class="tag-list hidden"></div>
+  <div class="file-actions">
+   <div><button id="selectAll" class="secondary" type="button">Select all</button> <span id="selectionCount" class="selection-count">0 selected</span></div>
+   <button id="importSelected" type="button" disabled>Import selected files</button>
+  </div>
+  <p class="hint">Selecting multiple files creates one subfolder in Bambuddy. Source tags are added to every imported file.</p>
+  <div id="fileList"></div>
+ </div>
  <div class="panel"><label for="directUrl">Direct model-file URL</label><div class="row"><input id="directUrl" type="url" placeholder="https://example.com/model.3mf"><button id="directImport" class="secondary">Import file</button></div><p class="hint">This must be a direct file-download URL, not a model's web page.</p><div id="directStatus" class="status"></div></div>
 </section>
 <p class="hint">After import, open Bambuddy → File Manager, select the new file, then use the OrcaSlicer sidecar to slice it.</p>
@@ -1013,10 +1373,13 @@ label{display:block;font-weight:600;font-size:14px;margin-bottom:7px}input{width
 let importerPassword='';let currentModel=null;
 const $=id=>document.getElementById(id);
 function showStatus(id,message,error=false){const el=$(id);el.textContent=message;el.classList.remove('hidden');el.style.display='block';el.classList.toggle('error',error)}
-async function api(path,body){const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-Importer-Password':importerPassword},body:JSON.stringify(body)});let data={};try{data=await response.json()}catch{}if(!response.ok)throw new Error(data.detail||`HTTP ${response.status}`);return data}
+async function api(path,body){const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-Importer-Password':importerPassword},body:JSON.stringify(body)});let data={};try{data=await response.json()}catch{}if(!response.ok)throw new Error(data.detail||('HTTP '+response.status));return data}
+function selectedFiles(){return [...document.querySelectorAll('.file-check:checked')].map(box=>box._modelFile)}
+function updateSelection(){const count=selectedFiles().length;$('selectionCount').textContent=count+' selected';$('importSelected').disabled=count===0}
 $('unlock').onclick=()=>{importerPassword=$('password').value;if(!importerPassword){showStatus('loginStatus','Enter the importer password.',true);return}$('loginPanel').classList.add('hidden');$('mainPanel').classList.remove('hidden')};
 $('password').addEventListener('keydown',e=>{if(e.key==='Enter')$('unlock').click()});
-$('resolve').onclick=async()=>{const url=$('modelUrl').value.trim();if(!url)return showStatus('resolveStatus','Paste a model URL first.',true);$('resolve').disabled=true;$('modelPanel').classList.add('hidden');try{currentModel=await api('/api/resolve',{url});$('source').textContent=currentModel.source;$('modelTitle').textContent=currentModel.title;$('fileList').replaceChildren();for(const file of currentModel.files){const row=document.createElement('div');row.className='file';const info=document.createElement('div');const title=document.createElement('strong');title.textContent=file.name;const sub=document.createElement('small');const size=file.size?` • ${(Number(file.size)/1048576).toFixed(2)} MB`:'';sub.textContent=`${file.kind||'file'}${size}${file.note?' • '+file.note:''}`;info.append(title,sub);const button=document.createElement('button');button.textContent='Import to Bambuddy';button.onclick=()=>doImport(file,button);row.append(info,button);$('fileList').append(row)}$('modelPanel').classList.remove('hidden');showStatus('resolveStatus',`Found ${currentModel.files.length} supported file(s). Select the one to import.`)}catch(e){showStatus('resolveStatus',e.message,true)}finally{$('resolve').disabled=false}};
-async function doImport(file,button){button.disabled=true;button.textContent='Importing…';try{const result=await api('/api/import',{url:currentModel.url,file_id:file.id,file_type:file.kind,filename:file.name});button.textContent='Imported';const importedNames=result.filenames?.join(', ')||result.imported_files?.map(item=>item.filename).filter(Boolean).join(', ');showStatus('resolveStatus',`Imported ${importedNames||result.filename||file.name} into Bambuddy library.`);const id=result.id??result.library_file_id;if(id)window.parent.postMessage({type:'bambuddy:navigate',path:`/files?highlight=${encodeURIComponent(id)}`},'*')}catch(e){button.disabled=false;button.textContent='Retry import';showStatus('resolveStatus',e.message,true)}}
+$('selectAll').onclick=()=>{const boxes=[...document.querySelectorAll('.file-check')];const all=boxes.length>0&&boxes.every(box=>box.checked);boxes.forEach(box=>box.checked=!all);$('selectAll').textContent=all?'Select all':'Clear selection';updateSelection()};
+$('resolve').onclick=async()=>{const url=$('modelUrl').value.trim();if(!url)return showStatus('resolveStatus','Paste a model URL first.',true);$('resolve').disabled=true;$('modelPanel').classList.add('hidden');try{currentModel=await api('/api/resolve',{url:url});$('source').textContent=currentModel.source;$('modelTitle').textContent=currentModel.title;$('fileList').replaceChildren();$('sourceTags').replaceChildren();const sourceTags=currentModel.tags||[];if(sourceTags.length){const heading=document.createElement('strong');heading.textContent='Source tags:';$('sourceTags').append(heading);sourceTags.forEach(name=>{const chip=document.createElement('span');chip.className='tag-chip';chip.textContent=name;$('sourceTags').append(chip)});$('sourceTags').classList.remove('hidden')}else{$('sourceTags').classList.add('hidden')}for(const file of currentModel.files){const row=document.createElement('div');row.className='file';const checkbox=document.createElement('input');checkbox.type='checkbox';checkbox.className='file-check';checkbox._modelFile=file;checkbox.addEventListener('change',updateSelection);const info=document.createElement('div');info.className='file-info';const title=document.createElement('strong');title.textContent=file.name;const sub=document.createElement('small');const size=file.size?' • '+(Number(file.size)/1048576).toFixed(2)+' MB':'';sub.textContent=(file.kind||'file')+size+(file.note?' • '+file.note:'');info.append(title,sub);row.append(checkbox,info);$('fileList').append(row)}$('selectAll').textContent='Select all';updateSelection();$('modelPanel').classList.remove('hidden');showStatus('resolveStatus','Found '+currentModel.files.length+' supported file(s). Select the parts to import together.')}catch(e){showStatus('resolveStatus',e.message,true)}finally{$('resolve').disabled=false}};
+$('importSelected').onclick=async()=>{const selected=selectedFiles();if(!selected.length)return showStatus('resolveStatus','Select at least one file.',true);$('importSelected').disabled=true;$('importSelected').textContent='Importing…';try{const result=await api('/api/import-batch',{url:currentModel.url,files:selected.map(file=>({file_id:file.id,file_type:file.kind,filename:file.name}))});let message='Imported '+(result.files_imported||0)+' file(s) into Bambuddy.';if(result.folder)message+='\nFolder: '+result.folder.name;if(result.tags_assigned&&result.tags_assigned.length)message+='\nBambuddy tags: '+result.tags_assigned.join(', ');if(result.tag_warning)message+='\nTag warning: '+result.tag_warning;if(result.failed_files&&result.failed_files.length)message+='\nFailed: '+result.failed_files.map(item=>item.filename+': '+item.error).join('; ');showStatus('resolveStatus',message,result.files_imported===0);$('importSelected').textContent='Import selected files';updateSelection();const first=result.imported_files&&result.imported_files[0]&&result.imported_files[0].id;if(first)window.parent.postMessage({type:'bambuddy:navigate',path:'/files?highlight='+encodeURIComponent(first)},'*')}catch(e){showStatus('resolveStatus',e.message,true);$('importSelected').textContent='Retry import';updateSelection()}};
 $('directImport').onclick=async()=>{const url=$('directUrl').value.trim();if(!url)return showStatus('directStatus','Paste a direct HTTPS file URL first.',true);$('directImport').disabled=true;try{const result=await api('/api/import-direct',{url});showStatus('directStatus',`Imported ${result.filename||'file'} into Bambuddy. Open File Manager to slice it.`)}catch(e){showStatus('directStatus',e.message,true)}finally{$('directImport').disabled=false}};
 </script></body></html>'''

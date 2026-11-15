@@ -8,6 +8,9 @@ The importer runs as a separate service. It does not replace or modify Bambuddy.
 
 - Import public models from several sources without creating accounts on those source sites.
 - Resolve supported model pages and list downloadable model files.
+- Select and import multiple files from the same model page in one operation.
+- Automatically create a Bambuddy subfolder for multi-file model imports.
+- Import source tags into Bambuddy's tag catalog and assign them to imported files when the source exposes tags.
 - Import direct HTTPS links to supported model files.
 - Upload selected files to Bambuddy through its library API.
 - Password-protected web interface.
@@ -46,9 +49,11 @@ Sites where the model page is public but the actual download requires a login, p
 1. Open the importer web interface.
 2. Enter the importer password.
 3. Paste a supported model-page URL or a direct HTTPS file URL.
-4. Select a supported file when the source returns a file list.
-5. The importer downloads the file server-side and uploads it to Bambuddy's library API.
-6. Open the imported file in Bambuddy and use the slicer configured in that installation.
+4. Select one or more supported files from the model page.
+5. When multiple files are selected, the importer creates a Bambuddy subfolder named after the model and uploads the selected parts into it. Single-file imports stay in the library root. A single Smithsonian or Internet Archive ZIP that expands into several mesh files also gets a subfolder.
+6. When the source provides tags or categories, the importer displays them before import, reuses matching Bambuddy tags or creates missing tags, then assigns those tags to the imported files. Sources that do not expose tags are imported without source tags.
+7. The importer downloads the selected files server-side and uploads them to Bambuddy's library API.
+8. Open the imported files in Bambuddy and use the slicer configured in that installation.
 
 Importing a model does not automatically slice or start a print. Slicing and printer control remain within Bambuddy and any separately configured services.
 
@@ -70,7 +75,7 @@ The repository includes a generic `compose.yaml` for a Portainer Git Repository 
 | Variable | Description |
 |---|---|
 | `BAMBUDDY_URL` | Base URL of the Bambuddy API, reachable from the importer container. |
-| `BAMBUDDY_API_KEY` | Bambuddy API key with **Manage Library** permission. |
+| `BAMBUDDY_API_KEY` | Bambuddy API key with **Manage Library** permission. This scope is used for uploads, folder creation and tag creation/assignment. |
 | `IMPORTER_PASSWORD` | Long, unique password used to unlock the importer interface. |
 
 ### Optional environment variables
@@ -123,7 +128,7 @@ docker compose up -d
 
 - Restrict access to trusted users and networks, such as a private LAN or VPN.
 - Do not expose the importer directly to the public internet without an appropriate secure access layer.
-- Use a dedicated Bambuddy API key with only the permissions needed to upload files to the library.
+- Use a dedicated Bambuddy API key with the **Manage Library** scope needed for file uploads, folder creation and tag assignment.
 - Do not commit `.env` files, API keys, access tokens or passwords.
 - The importer only accepts public HTTPS download URLs and rejects destinations that resolve to non-public IP addresses.
 - Model files and archives are untrusted input. Review imported models before printing them.

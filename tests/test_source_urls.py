@@ -11,7 +11,11 @@ from app import (
     parse_smithsonian_id,
     parse_thingiverse_id,
     parse_wikimedia_title,
+    normalize_source_tags,
+    needs_model_folder,
     safe_filename,
+    safe_folder_name,
+    uploaded_file_ids,
 )
 
 
@@ -148,6 +152,61 @@ class SourceUrlParsingTests(unittest.TestCase):
     def test_unsupported_file_extension_is_rejected(self):
         with self.assertRaises(Exception):
             safe_filename("model.gltf")
+
+
+
+
+class ImportOrganizationTests(unittest.TestCase):
+    def test_source_tags_are_normalized_and_deduplicated(self):
+        self.assertEqual(
+            normalize_source_tags(
+                [{"name": " Miniature "}, {"name": "miniature"}],
+                ["mechanical", "display model"],
+                "should not become one concatenated tag",
+                [123, None],
+            ),
+            ["Miniature", "mechanical", "display model", "should not become one concatenated tag"],
+        )
+
+    def test_empty_and_numeric_source_tags_are_ignored(self):
+        self.assertEqual(normalize_source_tags(["", "   ", "12345", None]), [])
+
+    def test_folder_name_is_safe_and_readable(self):
+        self.assertEqual(
+            safe_folder_name(r"Model: A/B? <test>"),
+            "Model A B test",
+        )
+
+    def test_multiple_files_from_one_model_get_a_folder(self):
+        selected = [
+            {"id": "1", "kind": "stl", "name": "body.stl"},
+            {"id": "2", "kind": "stl", "name": "lid.stl"},
+        ]
+        self.assertTrue(needs_model_folder("https://www.printables.com/model/123-example", selected))
+
+    def test_single_normal_file_stays_in_library_root(self):
+        selected = [{"id": "1", "kind": "stl", "name": "body.stl"}]
+        self.assertFalse(needs_model_folder("https://www.printables.com/model/123-example", selected))
+
+    def test_single_smithsonian_zip_gets_a_folder_for_extracted_meshes(self):
+        selected = [{"id": "https://3d-api.si.edu/model.zip", "kind": "smithsonian_stl", "name": "model.zip"}]
+        self.assertTrue(needs_model_folder(
+            "https://3d.si.edu/object/3d/model:d8c6457e-4ebc-11ea-b77f-2e728ce88125",
+            selected,
+        ))
+
+    def test_single_internet_archive_zip_gets_a_folder(self):
+        selected = [{"id": "thing.zip", "kind": "archive", "name": "thing.zip"}]
+        self.assertTrue(needs_model_folder("https://archive.org/details/thingiverse-123", selected))
+
+    def test_uploaded_file_ids_include_files_expanded_from_archives(self):
+        self.assertEqual(
+            uploaded_file_ids([
+                {"id": 10, "filename": "body.stl"},
+                {"imported_files": [{"id": 11}, {"id": 12}]},
+            ]),
+            [10, 11, 12],
+        )
 
 
 if __name__ == "__main__":
