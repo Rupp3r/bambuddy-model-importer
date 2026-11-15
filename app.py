@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import hashlib
 import ipaddress
 import os
 import re
@@ -96,11 +97,48 @@ class SourceError(Exception):
     pass
 
 
+SESSION_TOKEN_TTL_SECONDS = 365 * 24 * 60 * 60
+
+
+def create_session_token(secret: str | None = None, now: int | None = None) -> str:
+    """Create a long-lived, signed browser session token without storing the password."""
+    signing_secret = APP_PASSWORD if secret is None else secret
+    if not signing_secret:
+        raise HTTPException(503, "Importer is not configured: set IMPORTER_PASSWORD in the .env file.")
+    issued_at = int(time.time() if now is None else now)
+    payload = f"bambuddy-importer-session:v1:{issued_at}"
+    signature = hmac.new(signing_secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    return f"v1.{issued_at}.{signature}"
+
+
+def verify_session_token(token: str | None, secret: str | None = None, now: int | None = None) -> bool:
+    """Verify a signed browser session token. Changing IMPORTER_PASSWORD revokes all tokens."""
+    signing_secret = APP_PASSWORD if secret is None else secret
+    if not signing_secret or not token:
+        return False
+    try:
+        version, issued_text, supplied_signature = token.split(".", 2)
+        if version != "v1" or not issued_text.isdigit():
+            return False
+        issued_at = int(issued_text)
+    except (ValueError, AttributeError):
+        return False
+    current_time = int(time.time() if now is None else now)
+    if issued_at > current_time + 300 or current_time - issued_at > SESSION_TOKEN_TTL_SECONDS:
+        return False
+    payload = f"bambuddy-importer-session:v1:{issued_at}"
+    expected = hmac.new(signing_secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    return hmac.compare_digest(supplied_signature, expected)
+
+
 def check_password(password: str | None) -> None:
     if not APP_PASSWORD:
         raise HTTPException(503, "Importer is not configured: set IMPORTER_PASSWORD in the .env file.")
-    if password is None or not hmac.compare_digest(password, APP_PASSWORD):
-        raise HTTPException(401, "Incorrect importer password.")
+    if password is not None and hmac.compare_digest(password, APP_PASSWORD):
+        return
+    if verify_session_token(password):
+        return
+    raise HTTPException(401, "Incorrect importer password or expired remembered session.")
 
 
 def parse_printables_id(url: str) -> str | None:
@@ -1288,6 +1326,15 @@ async def run_model_import(url: str, selections: list[ImportSelection]) -> dict:
     }
 
 
+@app.post("/api/session")
+async def api_session(x_importer_password: str | None = Header(default=None)) -> dict:
+    check_password(x_importer_password)
+    return {
+        "token": create_session_token(),
+        "expires_in": SESSION_TOKEN_TTL_SECONDS,
+    }
+
+
 @app.get("/health")
 async def health() -> dict:
     return {"status": "ok"}
@@ -1345,14 +1392,23 @@ main{max-width:850px;margin:0 auto;padding:22px 16px 48px}.head{display:flex;ali
 h1{font-size:22px;margin:0}p{color:var(--muted);line-height:1.5}.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px;margin:14px 0}
 label{display:block;font-weight:600;font-size:14px;margin-bottom:7px}input{width:100%;padding:13px;border:1px solid #4b5563;border-radius:9px;background:#111827;color:var(--text);font:inherit;min-width:0}
 .row{display:flex;gap:9px}.row input{flex:1}button{border:0;border-radius:9px;padding:12px 16px;background:var(--accent);color:#052e16;font-weight:700;font:inherit;cursor:pointer;white-space:nowrap}button:disabled{opacity:.5;cursor:wait}.secondary{background:#374151;color:var(--text);border:1px solid #4b5563}
+.remember-option{display:flex;align-items:center;gap:9px;margin-top:13px;font-weight:500}.remember-option input{width:18px;min-width:18px;height:18px;margin:0;accent-color:var(--accent)}
+.login-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:0 2px;margin:0 0 12px}.login-toolbar button{padding:8px 11px;font-size:13px}
 .file{display:flex;align-items:center;justify-content:flex-start;gap:12px;border-top:1px solid var(--line);padding:13px 0}.file:first-child{border-top:0}.file input[type=checkbox]{width:21px;height:21px;flex:0 0 auto;margin:0;accent-color:var(--accent)}.file-info{flex:1;min-width:0}.file small{display:block;color:var(--muted);margin-top:3px;overflow-wrap:anywhere}
 .file-actions{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:14px 0}.selection-count{color:var(--muted);font-size:13px;margin-left:10px}.tag-list{display:flex;gap:7px;flex-wrap:wrap;margin:12px 0}.tag-chip{font-size:12px;padding:4px 9px;border:1px solid #4b5563;background:#111827;border-radius:999px;color:#d1d5db}
 .status{white-space:pre-wrap;padding:12px;border-radius:9px;background:#111827;color:#d1d5db;margin-top:12px;display:none}.status.error{color:#fecaca;border:1px solid #7f1d1d}.hint{font-size:13px}.hidden{display:none!important}.tag{color:#86efac;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.06em}
 @media(max-width:560px){.row{flex-direction:column}.row button{width:100%}.file-actions{align-items:stretch;flex-direction:column}.file-actions button{width:100%}.selection-count{margin-left:0}.file{align-items:flex-start}}
 </style></head><body><main>
 <div class="head"><div class="mark">⬇</div><div><h1>Bambuddy Model Importer</h1><div class="hint" style="color:var(--muted)">Fetch a public model directly into your Bambuddy library</div></div></div>
-<section class="panel" id="loginPanel"><label for="password">Importer password</label><div class="row"><input id="password" type="password" autocomplete="current-password" placeholder="Password configured in .env"><button id="unlock">Unlock</button></div><div class="hint" style="color:var(--muted);margin-top:8px">The password is kept only in this browser tab. Your Bambuddy API key stays on the server.</div><div id="loginStatus" class="status"></div></section>
+<section class="panel" id="loginPanel">
+ <label for="password">Importer password</label>
+ <div class="row"><input id="password" type="password" autocomplete="current-password" placeholder="Password configured in .env"><button id="unlock">Unlock</button></div>
+ <label class="remember-option"><input id="rememberLogin" type="checkbox" checked> Remember this browser on this device</label>
+ <div class="hint" style="color:var(--muted);margin-top:8px">When enabled, a signed session token is saved in this browser for up to one year. The importer password and Bambuddy API key are not stored in browser storage.</div>
+ <div id="loginStatus" class="status"></div>
+</section>
 <section id="mainPanel" class="hidden">
+ <div class="login-toolbar"><span class="hint">Importer session active on this device</span><button id="forgetLogin" class="secondary" type="button">Forget saved login</button></div>
  <div class="panel"><label for="modelUrl">Model page URL</label><div class="row"><input id="modelUrl" type="url" placeholder="https://www.printables.com/model/..."><button id="resolve">Find files</button></div><p class="hint">No source-site account is needed for public/free Printables, NASA 3D Resources, NIH 3D, Smithsonian print-ready STL files, Wikimedia Commons and archived Thingiverse models on Internet Archive. Select several files below to group them in one Bambuddy subfolder. Source tags are imported automatically when available. Thingiverse's live API still requires its own App Token.</p><div id="resolveStatus" class="status"></div></div>
  <div id="modelPanel" class="panel hidden">
   <div class="tag" id="source"></div>
@@ -1376,8 +1432,55 @@ function showStatus(id,message,error=false){const el=$(id);el.textContent=messag
 async function api(path,body){const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-Importer-Password':importerPassword},body:JSON.stringify(body)});let data={};try{data=await response.json()}catch{}if(!response.ok)throw new Error(data.detail||('HTTP '+response.status));return data}
 function selectedFiles(){return [...document.querySelectorAll('.file-check:checked')].map(box=>box._modelFile)}
 function updateSelection(){const count=selectedFiles().length;$('selectionCount').textContent=count+' selected';$('importSelected').disabled=count===0}
-$('unlock').onclick=()=>{importerPassword=$('password').value;if(!importerPassword){showStatus('loginStatus','Enter the importer password.',true);return}$('loginPanel').classList.add('hidden');$('mainPanel').classList.remove('hidden')};
+const REMEMBERED_SESSION_KEY='bambuddy-importer-session-v1';
+function showImporter(){ $('loginPanel').classList.add('hidden');$('mainPanel').classList.remove('hidden') }
+function clearRememberedSession(){try{localStorage.removeItem(REMEMBERED_SESSION_KEY)}catch{}}
+async function restoreRememberedSession(){
+ let savedToken='';
+ try{savedToken=localStorage.getItem(REMEMBERED_SESSION_KEY)||''}catch{return}
+ if(!savedToken)return;
+ importerPassword=savedToken;
+ try{
+  const session=await api('/api/session',{});
+  importerPassword=session.token;
+  try{localStorage.setItem(REMEMBERED_SESSION_KEY,session.token)}catch{}
+  showImporter();
+ }catch(e){
+  importerPassword='';
+  clearRememberedSession();
+  showStatus('loginStatus','The remembered login expired or was invalid. Enter the importer password again.',true);
+ }
+}
+$('unlock').onclick=async()=>{
+ const enteredPassword=$('password').value;
+ if(!enteredPassword){showStatus('loginStatus','Enter the importer password.',true);return}
+ $('unlock').disabled=true;
+ importerPassword=enteredPassword;
+ try{
+  if($('rememberLogin').checked){
+   const session=await api('/api/session',{});
+   importerPassword=session.token;
+   try{localStorage.setItem(REMEMBERED_SESSION_KEY,session.token)}
+   catch{showStatus('loginStatus','Browser storage is unavailable, so this login will last only until the importer tab is reloaded.',true)}
+  }else{
+   clearRememberedSession();
+  }
+  showImporter();
+ }catch(e){
+  importerPassword='';
+  showStatus('loginStatus',e.message,true);
+ }finally{$('unlock').disabled=false}
+};
 $('password').addEventListener('keydown',e=>{if(e.key==='Enter')$('unlock').click()});
+$('forgetLogin').onclick=()=>{
+ clearRememberedSession();
+ importerPassword='';
+ $('password').value='';
+ $('mainPanel').classList.add('hidden');
+ $('loginPanel').classList.remove('hidden');
+ showStatus('loginStatus','Saved login removed from this browser.',false);
+};
+restoreRememberedSession();
 $('selectAll').onclick=()=>{const boxes=[...document.querySelectorAll('.file-check')];const all=boxes.length>0&&boxes.every(box=>box.checked);boxes.forEach(box=>box.checked=!all);$('selectAll').textContent=all?'Select all':'Clear selection';updateSelection()};
 $('resolve').onclick=async()=>{const url=$('modelUrl').value.trim();if(!url)return showStatus('resolveStatus','Paste a model URL first.',true);$('resolve').disabled=true;$('modelPanel').classList.add('hidden');try{currentModel=await api('/api/resolve',{url:url});$('source').textContent=currentModel.source;$('modelTitle').textContent=currentModel.title;$('fileList').replaceChildren();$('sourceTags').replaceChildren();const sourceTags=currentModel.tags||[];if(sourceTags.length){const heading=document.createElement('strong');heading.textContent='Source tags:';$('sourceTags').append(heading);sourceTags.forEach(name=>{const chip=document.createElement('span');chip.className='tag-chip';chip.textContent=name;$('sourceTags').append(chip)});$('sourceTags').classList.remove('hidden')}else{$('sourceTags').classList.add('hidden')}for(const file of currentModel.files){const row=document.createElement('div');row.className='file';const checkbox=document.createElement('input');checkbox.type='checkbox';checkbox.className='file-check';checkbox._modelFile=file;checkbox.addEventListener('change',updateSelection);const info=document.createElement('div');info.className='file-info';const title=document.createElement('strong');title.textContent=file.name;const sub=document.createElement('small');const size=file.size?' • '+(Number(file.size)/1048576).toFixed(2)+' MB':'';sub.textContent=(file.kind||'file')+size+(file.note?' • '+file.note:'');info.append(title,sub);row.append(checkbox,info);$('fileList').append(row)}$('selectAll').textContent='Select all';updateSelection();$('modelPanel').classList.remove('hidden');showStatus('resolveStatus','Found '+currentModel.files.length+' supported file(s). Select the parts to import together.')}catch(e){showStatus('resolveStatus',e.message,true)}finally{$('resolve').disabled=false}};
 $('importSelected').onclick=async()=>{const selected=selectedFiles();if(!selected.length)return showStatus('resolveStatus','Select at least one file.',true);$('importSelected').disabled=true;$('importSelected').textContent='Importing…';try{const result=await api('/api/import-batch',{url:currentModel.url,files:selected.map(file=>({file_id:file.id,file_type:file.kind,filename:file.name}))});let message='Imported '+(result.files_imported||0)+' file(s) into Bambuddy.';if(result.folder)message+='\nFolder: '+result.folder.name;if(result.tags_assigned&&result.tags_assigned.length)message+='\nBambuddy tags: '+result.tags_assigned.join(', ');if(result.tag_warning)message+='\nTag warning: '+result.tag_warning;if(result.failed_files&&result.failed_files.length)message+='\nFailed: '+result.failed_files.map(item=>item.filename+': '+item.error).join('; ');showStatus('resolveStatus',message,result.files_imported===0);$('importSelected').textContent='Import selected files';updateSelection();const first=result.imported_files&&result.imported_files[0]&&result.imported_files[0].id;if(first)window.parent.postMessage({type:'bambuddy:navigate',path:'/files?highlight='+encodeURIComponent(first)},'*')}catch(e){showStatus('resolveStatus',e.message,true);$('importSelected').textContent='Retry import';updateSelection()}};

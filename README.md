@@ -57,7 +57,7 @@ Sites where the model page is public but the actual download requires a login, p
 ## How it works
 
 1. Open the importer web interface.
-2. Enter the importer password.
+2. Enter the importer password once on each browser/device. Keep **Remember this browser on this device** checked to automatically unlock on later visits.
 3. Paste a supported model-page URL or a direct HTTPS file URL.
 4. Select one or more supported files from the model page.
 5. When multiple files are selected, the importer creates a Bambuddy subfolder named after the model and uploads the selected parts into it. Single-file imports stay in the library root. A single Smithsonian or Internet Archive ZIP that expands into several mesh files also gets a subfolder.
@@ -139,6 +139,7 @@ docker compose up -d
 - Restrict access to trusted users and networks, such as a private LAN or VPN.
 - Do not expose the importer directly to the public internet without an appropriate secure access layer.
 - Use a dedicated Bambuddy API key with the **Manage Library** scope needed for file uploads, folder creation and tag assignment.
+- The optional **Remember this browser** setting stores a signed importer session token in that browser's local storage for up to one year. The importer password itself and the Bambuddy API key are not stored in the browser. Anyone with access to that browser profile can use the remembered importer session. Use **Forget saved login** on shared devices. Changing `IMPORTER_PASSWORD` invalidates existing remembered sessions.
 - Do not commit `.env` files, API keys, access tokens or passwords.
 - The importer only accepts public HTTPS download URLs and rejects destinations that resolve to non-public IP addresses.
 - Model files and archives are untrusted input. Review imported models before printing them.

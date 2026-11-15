@@ -1,6 +1,9 @@
 import unittest
 
 from app import (
+    SESSION_TOKEN_TTL_SECONDS,
+    create_session_token,
+    verify_session_token,
     _archive_license,
     _smithsonian_stl_options,
     parse_archive_id,
@@ -207,6 +210,35 @@ class ImportOrganizationTests(unittest.TestCase):
             ]),
             [10, 11, 12],
         )
+
+
+
+
+class RememberedSessionTests(unittest.TestCase):
+    def test_session_token_is_valid_for_same_password(self):
+        token = create_session_token(secret="test-password", now=1_000_000)
+        self.assertTrue(verify_session_token(token, secret="test-password", now=1_000_100))
+
+    def test_session_token_is_invalid_after_password_changes(self):
+        token = create_session_token(secret="old-password", now=1_000_000)
+        self.assertFalse(verify_session_token(token, secret="new-password", now=1_000_100))
+
+    def test_session_token_expires_after_one_year(self):
+        token = create_session_token(secret="test-password", now=1_000_000)
+        self.assertFalse(
+            verify_session_token(
+                token,
+                secret="test-password",
+                now=1_000_000 + SESSION_TOKEN_TTL_SECONDS + 1,
+            )
+        )
+
+    def test_session_token_with_future_issue_time_is_rejected(self):
+        token = create_session_token(secret="test-password", now=1_000_000)
+        self.assertFalse(verify_session_token(token, secret="test-password", now=999_000))
+
+    def test_malformed_session_token_is_rejected(self):
+        self.assertFalse(verify_session_token("not-a-valid-session-token", secret="test-password", now=1_000_000))
 
 
 if __name__ == "__main__":
