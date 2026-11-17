@@ -1,7 +1,7 @@
 {
   "api_name": "Bambuddy Model Importer Extension API",
   "api_major": 1,
-  "contract_revision": 1,
+  "contract_revision": 2,
   "supported_api_majors": [
     1
   ],
@@ -21,7 +21,9 @@
     "multi-file-folders",
     "source-tags",
     "direct-file-import",
-    "supported-source-discovery"
+    "supported-source-discovery",
+    "resolve",
+    "batch-import"
   ],
   "sources": [
     {
@@ -79,7 +81,8 @@
       "hosts": [
         "thingiverse.com"
       ],
-      "account_required": true
+      "account_required": true,
+      "requirement": "THINGIVERSE_TOKEN"
     },
     {
       "id": "direct-file",
@@ -88,15 +91,6 @@
         "any public HTTPS host"
       ],
       "account_required": false
-    },
-    {
-      "id": "thingiverse-live",
-      "name": "Thingiverse live API",
-      "hosts": [
-        "thingiverse.com"
-      ],
-      "account_required": true,
-      "requirement": "THINGIVERSE_TOKEN"
     }
   ],
   "compatibility": {
