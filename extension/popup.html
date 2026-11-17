@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Bambuddy Model Importer</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header class="header">
+    <div class="logo" aria-hidden="true">B</div>
+    <div class="header-copy">
+      <h1>Bambuddy Model Importer</h1>
+      <p id="subtitle">Checking current page…</p>
+    </div>
+    <button id="settings" class="icon-button" title="Settings" aria-label="Settings">⚙</button>
+  </header>
+
+  <main>
+    <section id="state-config" class="state hidden">
+      <h2>Connect your importer</h2>
+      <p>Set the URL and importer password in extension settings first.</p>
+      <button id="configure" class="primary">Open settings</button>
+    </section>
+
+    <section id="state-loading" class="state">
+      <div class="spinner"></div>
+      <p>Connecting to importer…</p>
+    </section>
+
+    <section id="state-error" class="state hidden">
+      <div class="state-icon">!</div>
+      <h2 id="error-title">Could not import this page</h2>
+      <p id="error-detail"></p>
+      <button id="retry" class="secondary">Try again</button>
+    </section>
+
+    <section id="state-model" class="hidden">
+      <div class="source-row">
+        <span id="source" class="source-label"></span>
+        <span id="file-count" class="muted"></span>
+      </div>
+      <h2 id="model-title" class="model-title"></h2>
+      <div id="source-tags" class="tags hidden"></div>
+
+      <label class="field-label" for="model-url">Model page URL</label>
+      <div class="url-row">
+        <input id="model-url" type="url" spellcheck="false">
+        <button id="resolve" class="secondary small">Resolve</button>
+      </div>
+
+      <div class="selection-toolbar">
+        <button id="select-all" class="text-button">Select all</button>
+        <span id="selection-count" class="muted">0 selected</span>
+      </div>
+      <div id="file-list" class="file-list"></div>
+
+      <button id="import-selected" class="primary import-button" disabled>Import selected files</button>
+      <div id="result" class="result hidden" role="status"></div>
+      <button id="open-importer" class="open-link hidden">Open importer</button>
+    </section>
+  </main>
+
+  <footer>
+    <span>Files are downloaded by your self-hosted importer.</span>
+    <a href="https://github.com/Rupp3r/bambuddy-model-importer" target="_blank" rel="noreferrer">Project</a>
+  </footer>
+  <script src="popup.js"></script>
+</body>
+</html>

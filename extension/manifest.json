@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "Bambuddy Model Importer",
+  "version": "1.0.0",
+  "description": "Send models from supported public 3D model sites to your self-hosted Bambuddy Model Importer.",
+  "permissions": [
+    "storage",
+    "activeTab"
+  ],
+  "optional_host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Send model to Bambuddy",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "options_page": "options.html",
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

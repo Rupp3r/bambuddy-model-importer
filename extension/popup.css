@@ -1,0 +1,109 @@
+:root {
+  color-scheme: dark;
+  --bg: #111827;
+  --panel: #1f2937;
+  --panel2: #0f172a;
+  --line: #374151;
+  --text: #f9fafb;
+  --muted: #9ca3af;
+  --green: #22c55e;
+  --green-ink: #052e16;
+  --red: #fca5a5;
+}
+* { box-sizing: border-box; }
+body {
+  width: 410px;
+  min-height: 300px;
+  max-height: 640px;
+  margin: 0;
+  overflow-y: auto;
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.45 system-ui, -apple-system, Segoe UI, sans-serif;
+}
+.header {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 15px 16px 13px;
+  border-bottom: 1px solid var(--line);
+  background: #172033;
+}
+.logo {
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border-radius: 10px;
+  background: #166534;
+  color: white;
+  font-size: 22px;
+  font-weight: 800;
+}
+.header-copy { min-width: 0; flex: 1; }
+h1 { margin: 0; font-size: 14px; font-weight: 750; }
+.header p { margin: 2px 0 0; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+h2 { margin: 0 0 8px; font-size: 16px; }
+.icon-button {
+  width: 34px; height: 34px; border: 1px solid var(--line); border-radius: 9px;
+  background: transparent; color: var(--text); cursor: pointer; font-size: 17px;
+}
+main { padding: 15px 16px 18px; }
+.state { text-align: center; padding: 22px 10px; }
+.state p { color: var(--muted); }
+.hidden { display: none !important; }
+.state-icon {
+  margin: 0 auto 10px; width: 32px; height: 32px; border-radius: 50%;
+  display: grid; place-items: center; background: #7f1d1d; color: #fee2e2; font-weight: 800;
+}
+.spinner {
+  width: 27px; height: 27px; margin: 10px auto 15px;
+  border: 3px solid #374151; border-top-color: var(--green); border-radius: 50%;
+  animation: spin .8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+button { font: inherit; cursor: pointer; }
+button:disabled { opacity: .45; cursor: not-allowed; }
+.primary, .secondary {
+  min-height: 37px; padding: 8px 13px; border-radius: 9px; font-weight: 700;
+}
+.primary { background: var(--green); color: var(--green-ink); border: 1px solid var(--green); }
+.secondary { background: #374151; color: var(--text); border: 1px solid #4b5563; }
+.secondary.small { min-width: 76px; }
+.source-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.source-label { color: #86efac; text-transform: uppercase; letter-spacing: .07em; font-size: 11px; font-weight: 800; }
+.muted { color: var(--muted); }
+.model-title { margin: 5px 0 10px; overflow-wrap: anywhere; }
+.field-label { display: block; margin: 14px 0 5px; font-weight: 700; }
+.url-row { display: flex; gap: 7px; }
+input[type="url"] {
+  flex: 1; min-width: 0; border: 1px solid #4b5563; border-radius: 8px;
+  padding: 9px 10px; color: var(--text); background: var(--panel2); font: inherit;
+}
+.tags { display: flex; flex-wrap: wrap; gap: 5px; margin: 0 0 11px; }
+.tag {
+  border: 1px solid #4b5563; border-radius: 999px; background: var(--panel2);
+  padding: 3px 8px; color: #d1d5db; font-size: 11px;
+}
+.selection-toolbar { display: flex; align-items: center; gap: 12px; margin: 15px 0 7px; }
+.text-button, .open-link {
+  padding: 0; border: 0; color: #86efac; background: transparent; font-weight: 700;
+}
+.file-list { max-height: 245px; overflow-y: auto; border-top: 1px solid var(--line); }
+.file-row { display: flex; align-items: flex-start; gap: 9px; padding: 10px 2px; border-bottom: 1px solid var(--line); }
+.file-row input { width: 17px; height: 17px; margin: 2px 0 0; flex: 0 0 auto; accent-color: var(--green); }
+.file-copy { min-width: 0; flex: 1; }
+.file-name { display: block; font-weight: 650; overflow-wrap: anywhere; }
+.file-meta { display: block; color: var(--muted); margin-top: 3px; font-size: 11px; overflow-wrap: anywhere; }
+.import-button { width: 100%; margin-top: 14px; }
+.result {
+  margin-top: 11px; padding: 10px; border: 1px solid #365b40;
+  border-radius: 9px; background: #10261a; white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.result.error { color: var(--red); background: #2a1218; border-color: #7f1d1d; }
+.open-link { display: block; margin: 12px auto 0; }
+footer {
+  display: flex; justify-content: space-between; gap: 10px; padding: 10px 16px;
+  border-top: 1px solid var(--line); color: var(--muted); font-size: 10px;
+}
+footer a { color: #86efac; text-decoration: none; }

@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Bambuddy Model Importer — Extension Settings</title>
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+  <main class="page">
+    <header>
+      <div class="logo">B</div>
+      <div><h1>Bambuddy Model Importer</h1><p>Browser extension settings</p></div>
+      <span id="version" class="version"></span>
+    </header>
+
+    <section class="card">
+      <h2>Importer connection</h2>
+      <label for="importer-url">Importer URL</label>
+      <input id="importer-url" type="url" placeholder="https://models.example.com" autocomplete="url" spellcheck="false">
+      <p class="hint">Enter the base URL of the Bambuddy Model Importer service, not the Bambuddy URL. Do not add a trailing slash.</p>
+
+      <label for="importer-password">Importer password</label>
+      <input id="importer-password" type="password" autocomplete="current-password" placeholder="Password configured for the importer">
+      <p class="hint">The password is exchanged for a signed session token. The extension stores the token locally in this browser profile; it does not store your password or Bambuddy API key.</p>
+
+      <div class="actions">
+        <button id="test-save" class="primary">Test connection and save</button>
+        <button id="forget" class="secondary" type="button">Forget connection</button>
+      </div>
+      <div id="status" class="status hidden" role="status"></div>
+    </section>
+
+    <section class="card">
+      <h2>Privacy and permissions</h2>
+      <ul>
+        <li>The extension reads the active tab URL only after you click its toolbar button.</li>
+        <li>It sends that URL and your selected file IDs to your own importer service.</li>
+        <li>Model downloads happen server-side in the importer. The extension does not download model files or contact the model sites directly.</li>
+        <li>The extension asks for permission to contact only the importer hostname you configure.</li>
+        <li>Your Bambuddy API key remains on the importer server and is never entered into this extension.</li>
+      </ul>
+    </section>
+
+    <section class="card">
+      <h2>How to connect</h2>
+      <ol>
+        <li>Deploy the Bambuddy Model Importer and set its <code>IMPORTER_PASSWORD</code>.</li>
+        <li>Enter the importer's URL and that password above.</li>
+        <li>Allow the browser permission for that importer host.</li>
+        <li>Open a supported model page and click the extension icon.</li>
+      </ol>
+      <p class="hint">The extension uses the importer's versioned API. Importer-only updates can add model sources without requiring a new extension build, as long as API v1 remains compatible.</p>
+    </section>
+    <footer><a href="https://github.com/Rupp3r/bambuddy-model-importer/releases" target="_blank" rel="noreferrer">Extension releases</a><a href="https://github.com/Rupp3r/bambuddy-model-importer" target="_blank" rel="noreferrer">Source code</a></footer>
+  </main>
+  <script src="api-contract.js"></script>
+  <script src="options.js"></script>
+</body>
+</html>

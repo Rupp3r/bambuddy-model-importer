@@ -54,6 +54,31 @@ Printables' GraphQL API and several other sites' undocumented/public endpoints c
 
 Sites where the model page is public but the actual download requires a login, personal access token or membership are not described as account-free sources and are not enabled as such.
 
+## Browser extension
+
+A Chrome/Chromium Manifest V3 extension is available from the [GitHub Releases](https://github.com/Rupp3r/bambuddy-model-importer/releases/latest) page.
+
+It adds a toolbar shortcut to import models from the same sources supported by this importer: Printables, NASA 3D Resources, NIH 3D, Smithsonian 3D, Wikimedia Commons, Internet Archive Thingiverse snapshots, optional live Thingiverse API, and direct HTTPS model-file links. The extension reads the current tab URL, asks the importer to resolve the model, lets you select files, then asks the importer to download and upload them. Multiple selections use the importer's existing folder and source-tag handling.
+
+### Extension setup
+
+1. Download the latest extension ZIP from [Releases](https://github.com/Rupp3r/bambuddy-model-importer/releases/latest) and extract it.
+2. Open `chrome://extensions/` in Chrome or the equivalent extensions page in a Chromium browser.
+3. Enable **Developer mode**, select **Load unpacked**, and choose the extracted extension folder.
+4. Open extension **Settings**. Enter the base URL of the importer service and its `IMPORTER_PASSWORD`.
+5. Allow the browser permission for that importer host, then click **Test connection and save**.
+6. Open a supported model page and click the extension toolbar button.
+
+The extension stores a signed session token in the browser profile, not the importer password or Bambuddy API key. The Bambuddy API key remains server-side in the importer configuration. Model files are downloaded by the importer container, not by the browser.
+
+### Compatibility and releases
+
+The importer and extension use the shared `extension/api-contract.json` contract and versioned `/api/extension/v1/*` endpoints. Additive backend changes and new model sources stay compatible with API v1. Breaking changes must use a new API major version and retain v1 while v1 clients are supported. The extension checks the API major version and required capabilities before it imports.
+
+GitHub Actions checks extension changes whenever the importer is updated. It creates a new extension ZIP and GitHub Release only when files under `extension/` change. Importer-only updates do not rebuild the extension; the last compatible extension release remains available from the same Releases page. Bump `extension/manifest.json` version when changing the extension so each package has a unique release tag.
+
+The extension requires CORS access from browser-extension origins on the importer service. This is enabled for Chrome/Chromium and Firefox extension origins; API calls still require the signed importer session token.
+
 ## How it works
 
 1. Open the importer web interface.

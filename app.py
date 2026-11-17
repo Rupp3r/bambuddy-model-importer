@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import hashlib
+import json
 import ipaddress
 import os
 import re
@@ -11,11 +12,12 @@ import io
 import zipfile
 import time
 from html import unescape
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from urllib.parse import urljoin, urlparse, unquote, quote, parse_qs
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
@@ -39,7 +41,22 @@ NASA_TREE_CACHE: dict = {"expires_at": 0.0, "tree": []}
 POLYHAVEN_API = "https://api.polyhaven.com"
 ALLOWED_EXTENSIONS = {".stl", ".3mf", ".step", ".stp", ".obj", ".amf"}
 
+EXTENSION_CONTRACT_PATH = Path(__file__).resolve().parent / "extension" / "api-contract.json"
+with EXTENSION_CONTRACT_PATH.open("r", encoding="utf-8") as contract_file:
+    EXTENSION_API_CONTRACT = json.load(contract_file)
+
 app = FastAPI(title="Bambuddy Model Importer", docs_url=None, redoc_url=None)
+# Browser extensions have their own origin. Accept Chromium and Firefox extension
+# origins so the extension can call this service cross-origin; API requests still
+# require the signed importer session token. No cookies are allowed.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origin_regex=r"^(chrome-extension|moz-extension)://[a-z0-9-]+$",
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "X-Importer-Password"],
+    allow_credentials=False,
+    max_age=3600,
+)
 
 
 class ResolveRequest(BaseModel):
@@ -1326,6 +1343,7 @@ async def run_model_import(url: str, selections: list[ImportSelection]) -> dict:
     }
 
 
+@app.post("/api/extension/v1/session")
 @app.post("/api/session")
 async def api_session(x_importer_password: str | None = Header(default=None)) -> dict:
     check_password(x_importer_password)
@@ -1340,11 +1358,25 @@ async def health() -> dict:
     return {"status": "ok"}
 
 
+@app.get("/api/extension/v1/info")
+async def extension_api_info(x_importer_password: str | None = Header(default=None)) -> dict:
+    check_password(x_importer_password)
+    return {
+        "api_name": EXTENSION_API_CONTRACT["api_name"],
+        "api_major": EXTENSION_API_CONTRACT["api_major"],
+        "contract_revision": EXTENSION_API_CONTRACT["contract_revision"],
+        "supported_api_majors": EXTENSION_API_CONTRACT["supported_api_majors"],
+        "features": EXTENSION_API_CONTRACT["features"],
+        "sources": EXTENSION_API_CONTRACT["sources"],
+    }
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index() -> str:
     return HTML
 
 
+@app.post("/api/extension/v1/resolve")
 @app.post("/api/resolve")
 async def api_resolve(body: ResolveRequest, x_importer_password: str | None = Header(default=None)) -> dict:
     check_password(x_importer_password)
@@ -1363,12 +1395,14 @@ async def api_import(body: ImportRequest, x_importer_password: str | None = Head
     )
 
 
+@app.post("/api/extension/v1/import-batch")
 @app.post("/api/import-batch")
 async def api_import_batch(body: BatchImportRequest, x_importer_password: str | None = Header(default=None)) -> dict:
     check_password(x_importer_password)
     return await run_model_import(body.url, body.files)
 
 
+@app.post("/api/extension/v1/import-direct")
 @app.post("/api/import-direct")
 async def api_import_direct(body: DirectImportRequest, x_importer_password: str | None = Header(default=None)) -> dict:
     check_password(x_importer_password)

@@ -1,0 +1,105 @@
+{
+  "api_name": "Bambuddy Model Importer Extension API",
+  "api_major": 1,
+  "contract_revision": 1,
+  "supported_api_majors": [
+    1
+  ],
+  "routes": {
+    "session": "/api/extension/v1/session",
+    "info": "/api/extension/v1/info",
+    "resolve": "/api/extension/v1/resolve",
+    "import_batch": "/api/extension/v1/import-batch",
+    "import_direct": "/api/extension/v1/import-direct"
+  },
+  "required_features": [
+    "resolve",
+    "batch-import",
+    "direct-file-import"
+  ],
+  "features": [
+    "multi-file-folders",
+    "source-tags",
+    "direct-file-import",
+    "supported-source-discovery"
+  ],
+  "sources": [
+    {
+      "id": "printables",
+      "name": "Printables",
+      "hosts": [
+        "printables.com"
+      ],
+      "account_required": false
+    },
+    {
+      "id": "nasa",
+      "name": "NASA 3D Resources",
+      "hosts": [
+        "science.nasa.gov",
+        "github.com/nasa/NASA-3D-Resources"
+      ],
+      "account_required": false
+    },
+    {
+      "id": "nih",
+      "name": "NIH 3D",
+      "hosts": [
+        "3d.nih.gov"
+      ],
+      "account_required": false
+    },
+    {
+      "id": "smithsonian",
+      "name": "Smithsonian 3D",
+      "hosts": [
+        "3d.si.edu"
+      ],
+      "account_required": false
+    },
+    {
+      "id": "wikimedia",
+      "name": "Wikimedia Commons",
+      "hosts": [
+        "commons.wikimedia.org"
+      ],
+      "account_required": false
+    },
+    {
+      "id": "internet-archive",
+      "name": "Internet Archive Thingiverse archive",
+      "hosts": [
+        "archive.org"
+      ],
+      "account_required": false
+    },
+    {
+      "id": "thingiverse",
+      "name": "Thingiverse live API",
+      "hosts": [
+        "thingiverse.com"
+      ],
+      "account_required": true
+    },
+    {
+      "id": "direct-file",
+      "name": "Direct HTTPS model-file URL",
+      "hosts": [
+        "any public HTTPS host"
+      ],
+      "account_required": false
+    },
+    {
+      "id": "thingiverse-live",
+      "name": "Thingiverse live API",
+      "hosts": [
+        "thingiverse.com"
+      ],
+      "account_required": true,
+      "requirement": "THINGIVERSE_TOKEN"
+    }
+  ],
+  "compatibility": {
+    "policy": "Additive changes remain on API v1. Breaking changes use a new versioned route and retain v1 while supported."
+  }
+}

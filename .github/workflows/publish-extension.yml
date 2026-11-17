@@ -1,0 +1,113 @@
+name: Package browser extension
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'app.py'
+      - 'Dockerfile'
+      - 'requirements.txt'
+      - 'tests/**'
+      - 'extension/**'
+      - '.github/workflows/publish-extension.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  detect-extension-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      extension_changed: ${{ steps.diff.outputs.extension_changed }}
+    steps:
+      - name: Check out repository history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check whether extension source changed
+        id: diff
+        shell: bash
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            changed=true
+          elif [ -z "$BEFORE_SHA" ] || [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ]; then
+            changed=true
+          elif git cat-file -e "$BEFORE_SHA^{commit}" 2>/dev/null && git diff --quiet "$BEFORE_SHA" "$GITHUB_SHA" -- extension/; then
+            changed=false
+          else
+            changed=true
+          fi
+          echo "extension_changed=$changed" >> "$GITHUB_OUTPUT"
+          if [ "$changed" = "false" ]; then
+            echo "Importer source changed, but extension/ did not. Skipping the extension build; the previous extension release remains available."
+            echo "https://github.com/Rupp3r/bambuddy-model-importer/releases"
+          fi
+
+  build-and-release-extension:
+    needs: detect-extension-changes
+    if: needs.detect-extension-changes.outputs.extension_changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Validate extension JavaScript and metadata
+        shell: bash
+        run: |
+          node --check extension/popup.js
+          node --check extension/options.js
+          node --check extension/api-contract.js
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          root = Path("extension")
+          manifest = json.loads((root / "manifest.json").read_text())
+          contract = json.loads((root / "api-contract.json").read_text())
+          assert manifest["manifest_version"] == 3
+          assert manifest["version"]
+          assert contract["api_major"] in contract["supported_api_majors"]
+          assert set(contract["required_features"]).issubset(set(contract["features"]))
+          for path in ("popup.html", "popup.js", "popup.css", "options.html", "options.js", "options.css"):
+              assert (root / path).is_file(), f"Missing extension file: {path}"
+          for path in manifest["icons"].values():
+              assert (root / path).is_file(), f"Missing extension icon: {path}"
+          print("Extension metadata and files are valid.")
+          PY
+
+      - name: Package extension
+        id: package
+        shell: bash
+        run: |
+          version="$(python -c 'import json; print(json.load(open("extension/manifest.json"))["version"])')"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          asset="bambuddy-model-importer-extension-v${version}.zip"
+          (cd extension && zip -qr "../$asset" .)
+          echo "asset=$asset" >> "$GITHUB_OUTPUT"
+
+      - name: Check that the extension version has not already been released
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.package.outputs.version }}
+        run: |
+          if gh release view "extension-v$VERSION" >/dev/null 2>&1; then
+            echo "Release extension-v$VERSION already exists. Bump extension/manifest.json version when publishing extension changes."
+            exit 1
+          fi
+
+      - name: Publish versioned extension release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.package.outputs.version }}
+          ASSET: ${{ steps.package.outputs.asset }}
+        run: |
+          gh release create "extension-v$VERSION" "$ASSET" \
+            --title "Bambuddy Model Importer Extension v$VERSION" \
+            --notes-file extension/RELEASE_NOTES.md
