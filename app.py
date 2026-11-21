@@ -19,7 +19,7 @@ from urllib.parse import urljoin, urlparse, unquote, quote, parse_qs
 import httpx
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel, Field
 
 APP_PASSWORD = os.environ.get("IMPORTER_PASSWORD", "").strip()
@@ -200,7 +200,7 @@ async def resolve_makerworld(url: str) -> dict:
     for i,plate in enumerate(instances,1):
         pid=plate.get("profileId") or plate.get("profile_id")
         if pid is None: continue
-        files.append({"id":str(pid),"kind":"makerworld_plate","name":str(plate.get("name") or f"Plate {i}")+".3mf","size":None,"note":f"MakerWorld plate {i}"})
+        files.append({"id":str(pid),"instance_id":plate.get("id"),"kind":"makerworld_plate","name":str(plate.get("title") or plate.get("name") or f"Plate {i}")+".3mf","size":None,"note":f"MakerWorld plate {i}"})
     if not files: raise HTTPException(404,"Bambuddy found no downloadable plates for this MakerWorld model.")
     return {"source":"MakerWorld via Bambuddy","title":design.get("title") or design.get("name") or f"MakerWorld {model_id}","url":url,"tags":normalize_source_tags(design.get("tags")),"files":files,"model_id":str(data.get("model_id") or model_id)}
 
@@ -1357,7 +1357,7 @@ async def import_resolved_file(url: str, selected: dict, folder_id: int | None) 
         return await bambuddy_upload(filename,payload,url,folder_id=folder_id)
     if parse_makerworld_id(url):
         model_id=parse_makerworld_id(url)
-        response=await bambuddy_request("POST","/makerworld/import",json={"model_id":int(model_id),"source_type":"makerworld","profile_id":int(file_id),"folder_id":folder_id})
+        response=await bambuddy_request("POST","/makerworld/import",json={"model_id":int(model_id),"source_type":"makerworld","instance_id":int(selected.get("instance_id") or 0) or None,"profile_id":int(file_id),"folder_id":folder_id})
         if response.status_code>=400:
             try: detail=response.json().get("detail",response.text)
             except Exception: detail=response.text
@@ -1527,7 +1527,16 @@ async def api_history(x_importer_password: str | None = Header(default=None)) ->
     for row in rows:
         row["file_url"]=f"{BAMBUDDY_URL}/files?highlight={row['file_id']}"
         row["slice_url"]=row["file_url"]+"&slice=1"
+        row["thumbnail_url"]=f"/api/history/{row['file_id']}/thumbnail?token={create_session_token()}"
     return rows
+
+
+@app.get("/api/history/{file_id}/thumbnail")
+async def api_history_thumbnail(file_id: int, token: str):
+    check_password(token)
+    response=await bambuddy_request("GET",f"/library/files/{file_id}/thumbnail")
+    if response.status_code>=400: raise HTTPException(response.status_code,"Thumbnail unavailable")
+    return Response(content=response.content,media_type=response.headers.get("content-type","image/png"),headers={"Cache-Control":"private, max-age=300"})
 
 
 @app.get("/api/extension/v1/info")
@@ -1622,6 +1631,7 @@ label{display:block;font-weight:600;font-size:14px;margin-bottom:7px}input{width
 .login-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:0 2px;margin:0 0 12px}.login-toolbar button{padding:8px 11px;font-size:13px}
 .file{display:flex;align-items:center;justify-content:flex-start;gap:12px;border-top:1px solid var(--line);padding:13px 0}.file:first-child{border-top:0}.file input[type=checkbox]{width:21px;height:21px;flex:0 0 auto;margin:0;accent-color:var(--accent)}.file-info{flex:1;min-width:0}.file small{display:block;color:var(--muted);margin-top:3px;overflow-wrap:anywhere}
 .file-actions{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:14px 0}.selection-count{color:var(--muted);font-size:13px;margin-left:10px}.tag-list{display:flex;gap:7px;flex-wrap:wrap;margin:12px 0}.tag-chip{font-size:12px;padding:4px 9px;border:1px solid #4b5563;background:#111827;border-radius:999px;color:#d1d5db}
+.history-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}.history-card{overflow:hidden;border:1px solid var(--line);border-radius:12px;background:#111827}.history-card img{width:100%;height:150px;object-fit:cover;background:#1f2937}.history-card-body{padding:12px}.history-card a{color:#86efac}.history-actions{display:flex;gap:8px;margin-top:10px}.history-actions a{padding:7px 9px;border-radius:7px;background:#374151;text-decoration:none;font-size:13px}
 .status{white-space:pre-wrap;padding:12px;border-radius:9px;background:#111827;color:#d1d5db;margin-top:12px;display:none}.status.error{color:#fecaca;border:1px solid #7f1d1d}.hint{font-size:13px}.hidden{display:none!important}.tag{color:#86efac;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.06em}
 @media(max-width:560px){.row{flex-direction:column}.row button{width:100%}.file-actions{align-items:stretch;flex-direction:column}.file-actions button{width:100%}.selection-count{margin-left:0}.file{align-items:flex-start}}
 </style></head><body><main>
@@ -1651,7 +1661,7 @@ label{display:block;font-weight:600;font-size:14px;margin-bottom:7px}input{width
   <div id="fileList"></div>
  </div>
  <div class="panel"><label for="directUrl">Direct model-file URL</label><div class="row"><input id="directUrl" type="url" placeholder="https://example.com/model.3mf"><button id="directImport" class="secondary">Import file</button></div><p class="hint">This must be a direct file-download URL, not a model's web page.</p><div id="directStatus" class="status"></div></div>
- <div class="panel"><h2 style="font-size:18px">Download history</h2><div id="historyList" class="hint">No downloads in this browser yet.</div></div>
+ <div class="panel"><h2 style="font-size:18px">Download history</h2><div id="historyList" class="history-grid">No downloads in this browser yet.</div></div>
 </section>
 <p class="hint">After import, open Bambuddy → File Manager, select the new file, then use the OrcaSlicer sidecar to slice it.</p>
 </main>
@@ -1664,7 +1674,7 @@ async function loadFolders(){const r=await fetch('/api/folders',{headers:{'X-Imp
 function selectedFiles(){return [...document.querySelectorAll('.file-check:checked')].map(box=>box._modelFile)}
 function updateSelection(){const files=selectedFiles();const count=files.length;$('selectionCount').textContent=count+' selected';$('importSelected').disabled=count===0;const projectFiles=files.filter(f=>/\.(3mf|gcode)(\.3mf)?$/i.test(f.name||''));$('saveSlice').disabled=count!==1||projectFiles.length!==1}
 let sliceAfterSave=false;
-async function renderHistory(){const root=$('historyList');root.replaceChildren();try{const r=await fetch('/api/history',{headers:{'X-Importer-Password':importerPassword}});const rows=await r.json();if(!rows.length){root.textContent='No downloads yet.';return}rows.forEach(x=>{const row=document.createElement('p');const file=document.createElement('a');file.href=x.file_url;file.textContent=x.title+' — '+x.filename;file.target='_blank';const site=document.createElement('a');site.href=x.url;site.textContent='Website';site.target='_blank';const slice=document.createElement('a');slice.href=x.slice_url;slice.textContent='Slice';slice.target='_blank';row.append(file,document.createTextNode(' · '),slice,document.createTextNode(' · '),site);root.append(row)})}catch{root.textContent='History is unavailable.'}}
+async function renderHistory(){const root=$('historyList');root.replaceChildren();try{const r=await fetch('/api/history',{headers:{'X-Importer-Password':importerPassword}});const rows=await r.json();if(!rows.length){root.textContent='No downloads yet.';return}rows.forEach(x=>{const card=document.createElement('article');card.className='history-card';const img=document.createElement('img');img.src=x.thumbnail_url;img.alt=x.title;img.loading='lazy';img.onerror=()=>{img.style.display='none'};const body=document.createElement('div');body.className='history-card-body';const title=document.createElement('strong');title.textContent=x.title||x.filename;const file=document.createElement('div');const fileLink=document.createElement('a');fileLink.href=x.file_url;fileLink.textContent=x.filename;fileLink.target='_blank';file.append(fileLink);const actions=document.createElement('div');actions.className='history-actions';[[x.file_url,'File'],[x.slice_url,'Slice'],[x.url,'Website']].forEach(([href,label])=>{const a=document.createElement('a');a.href=href;a.textContent=label;a.target='_blank';actions.append(a)});body.append(title,file,actions);card.append(img,body);root.append(card)})}catch{root.textContent='History is unavailable.'}}
 const REMEMBERED_SESSION_KEY='bambuddy-importer-session-v1';
 function showImporter(){ $('loginPanel').classList.add('hidden');$('mainPanel').classList.remove('hidden');loadFolders();renderHistory() }
 function clearRememberedSession(){try{localStorage.removeItem(REMEMBERED_SESSION_KEY)}catch{}}
@@ -1716,7 +1726,7 @@ $('forgetLogin').onclick=()=>{
 saveSlice.onclick=()=>{sliceAfterSave=true;importSelected.click()}; resolve.addEventListener('click',()=>loadFolders()); restoreRememberedSession();
 $('selectAll').onclick=()=>{const boxes=[...document.querySelectorAll('.file-check')];const all=boxes.length>0&&boxes.every(box=>box.checked);boxes.forEach(box=>box.checked=!all);$('selectAll').textContent=all?'Select all':'Clear selection';updateSelection()};
 $('resolve').onclick=async()=>{const url=$('modelUrl').value.trim();if(!url)return showStatus('resolveStatus','Paste a model URL first.',true);$('resolve').disabled=true;$('modelPanel').classList.add('hidden');try{currentModel=await api('/api/resolve',{url:url});$('source').textContent=currentModel.source;$('modelTitle').textContent=currentModel.title;$('fileList').replaceChildren();$('sourceTags').replaceChildren();const sourceTags=currentModel.tags||[];if(sourceTags.length){const heading=document.createElement('strong');heading.textContent='Source tags:';$('sourceTags').append(heading);sourceTags.forEach(name=>{const chip=document.createElement('span');chip.className='tag-chip';chip.textContent=name;$('sourceTags').append(chip)});$('sourceTags').classList.remove('hidden')}else{$('sourceTags').classList.add('hidden')}for(const file of currentModel.files){const row=document.createElement('div');row.className='file';const checkbox=document.createElement('input');checkbox.type='checkbox';checkbox.className='file-check';checkbox._modelFile=file;checkbox.addEventListener('change',updateSelection);const info=document.createElement('div');info.className='file-info';const title=document.createElement('strong');title.textContent=file.name;const sub=document.createElement('small');const size=file.size?' • '+(Number(file.size)/1048576).toFixed(2)+' MB':'';sub.textContent=(file.kind||'file')+size+(file.note?' • '+file.note:'');info.append(title,sub);row.append(checkbox,info);$('fileList').append(row)}$('selectAll').textContent='Select all';updateSelection();$('modelPanel').classList.remove('hidden');showStatus('resolveStatus','Found '+currentModel.files.length+' supported file(s). Select the parts to import together.')}catch(e){showStatus('resolveStatus',e.message,true)}finally{$('resolve').disabled=false}};
-$('importSelected').onclick=async()=>{const selected=selectedFiles();if(!selected.length)return showStatus('resolveStatus','Select at least one file.',true);$('importSelected').disabled=true;$('importSelected').textContent='Importing…';try{const result=await api('/api/import-batch',{url:currentModel.url,files:selected.map(file=>({file_id:file.id,file_type:file.kind,filename:file.name})),folder_id:destinationFolder.value?Number(destinationFolder.value):null,create_subfolder:createSubfolder.checked,title:titleOverride.value.trim()||null});let message='Imported '+(result.files_imported||0)+' file(s) into Bambuddy.';if(result.folder)message+='\nFolder: '+result.folder.name;if(result.tags_assigned&&result.tags_assigned.length)message+='\nBambuddy tags: '+result.tags_assigned.join(', ');if(result.tag_warning)message+='\nTag warning: '+result.tag_warning;if(result.failed_files&&result.failed_files.length)message+='\nFailed: '+result.failed_files.map(item=>item.filename+': '+item.error).join('; ');showStatus('resolveStatus',message,result.files_imported===0);$('importSelected').textContent='Import selected files';updateSelection();const first=result.imported_files&&result.imported_files[0]&&result.imported_files[0].id;if(first){const target=sliceAfterSave?result.slice_url:result.file_manager_url;if(window.parent===window){window.open(target,'_blank','noopener')}else{window.parent.postMessage({type:'bambuddy:navigate',path:'/files?highlight='+encodeURIComponent(first)+(sliceAfterSave?'&slice=1':'')},'*')}}sliceAfterSave=false}catch(e){showStatus('resolveStatus',e.message,true);$('importSelected').textContent='Retry import';updateSelection()}};
+$('importSelected').onclick=async()=>{const selected=selectedFiles();if(!selected.length)return showStatus('resolveStatus','Select at least one file.',true);$('importSelected').disabled=true;$('importSelected').textContent='Importing…';try{const result=await api('/api/import-batch',{url:currentModel.url,files:selected.map(file=>({file_id:file.id,file_type:file.kind,filename:file.name})),folder_id:destinationFolder.value?Number(destinationFolder.value):null,create_subfolder:createSubfolder.checked,title:titleOverride.value.trim()||null});let message='Imported '+(result.files_imported||0)+' file(s) into Bambuddy.';if(result.folder)message+='\nFolder: '+result.folder.name;if(result.tags_assigned&&result.tags_assigned.length)message+='\nBambuddy tags: '+result.tags_assigned.join(', ');if(result.tag_warning)message+='\nTag warning: '+result.tag_warning;if(result.failed_files&&result.failed_files.length)message+='\nFailed: '+result.failed_files.map(item=>item.filename+': '+item.error).join('; ');showStatus('resolveStatus',message,result.files_imported===0);$('importSelected').textContent='Import selected files';updateSelection();const first=result.imported_files&&result.imported_files[0]&&result.imported_files[0].id;if(first){const link=document.createElement('a');link.href=sliceAfterSave?result.slice_url:result.file_manager_url;link.target='_blank';link.textContent=sliceAfterSave?'Open saved file to slice':'Open saved file in File Manager';link.style.display='inline-block';link.style.marginTop='8px';$('resolveStatus').append(document.createElement('br'),link)}sliceAfterSave=false;renderHistory()}catch(e){showStatus('resolveStatus',e.message,true);$('importSelected').textContent='Retry import';updateSelection()}};
 $('directImport').onclick=async()=>{const url=$('directUrl').value.trim();if(!url)return showStatus('directStatus','Paste a direct HTTPS file URL first.',true);$('directImport').disabled=true;try{const result=await api('/api/import-direct',{url});showStatus('directStatus',`Imported ${result.filename||'file'} into Bambuddy. Open File Manager to slice it.`)}catch(e){showStatus('directStatus',e.message,true)}finally{$('directImport').disabled=false}};
 </script></body></html>'''
 
