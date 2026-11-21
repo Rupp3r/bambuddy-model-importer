@@ -26,6 +26,7 @@ from app import (
     source_url_tags,
     is_sliceable_filename,
     first_slicer_preset_refs,
+    normalize_preset_ref,
     desktop_slicer_url,
     needs_model_folder,
     safe_filename,
@@ -235,6 +236,12 @@ class ImportOrganizationTests(unittest.TestCase):
     def test_history_actions_stay_in_the_importer_tab_and_no_fake_slice_query_remains(self):
         self.assertNotIn("target='_blank'", importer.HTML)
         self.assertNotIn("&slice=1", importer.HTML)
+        self.assertIn("fileAction.target='_self'", importer.HTML)
+        self.assertIn("openHistoryFile(x.file_url,feedback)", importer.HTML)
+        self.assertIn("targetAddressSpace:space", importer.HTML)
+        self.assertIn("openSliceDialog(x.file_id", importer.HTML)
+        self.assertIn('id="slicePrinter"', importer.HTML)
+        self.assertIn('id="sliceProcess"', importer.HTML)
 
     def test_bambustudio_macos_protocol_is_used(self):
         with patch.object(importer, "BAMBUDDY_URL", "http://bambuddy:8756"):
@@ -296,6 +303,49 @@ class ImportOrganizationTests(unittest.TestCase):
         self.assertEqual(action["mode"], "desktop")
         self.assertTrue(action["slicer_url"].startswith("orcaslicer://open?file="))
         self.assertEqual(calls[-1][1], "/library/files/42/slicer-token")
+
+    def test_slice_dialog_preset_refs_are_source_aware_and_validated(self):
+        self.assertEqual(normalize_preset_ref({"source": "orca_cloud", "id": "p-42"}, "printer"),
+                         {"source": "orca_cloud", "id": "p-42"})
+        with self.assertRaises(importer.HTTPException):
+            normalize_preset_ref({"source": "unknown", "id": "42"}, "printer")
+
+    def test_interactive_sidecar_slice_posts_selected_presets_and_options(self):
+        class Response:
+            def __init__(self, payload, status_code=200):
+                self.payload = payload
+                self.status_code = status_code
+                self.text = ""
+            def json(self):
+                return self.payload
+
+        calls = []
+        replies = [Response({"filename": "bird.3mf"}), Response({"job_id": 55, "status": "queued", "status_url": "/api/v1/slice-jobs/55"}, 202)]
+        async def fake_request(method, path, **kwargs):
+            calls.append((method, path, kwargs))
+            return replies.pop(0)
+
+        options = {
+            "printer_preset": {"source": "local", "id": "10"},
+            "process_preset": {"source": "orca_cloud", "id": "fast"},
+            "filament_preset": {"source": "cloud", "id": "pla"},
+            "bed_type": "High Temp Plate",
+            "auto_arrange": True,
+            "auto_orient": False,
+        }
+        with patch.object(importer, "bambuddy_request", side_effect=fake_request):
+            result = asyncio.run(importer.queue_slice_with_options(42, options))
+
+        posted = calls[-1][2]["json"]
+        self.assertEqual(calls[-1][1], "/library/files/42/slice")
+        self.assertEqual(posted["printer_preset"], options["printer_preset"])
+        self.assertEqual(posted["process_preset"], options["process_preset"])
+        self.assertEqual(posted["filament_presets"], [options["filament_preset"]])
+        self.assertEqual(posted["bed_type"], "High Temp Plate")
+        self.assertTrue(posted["auto_arrange"])
+        self.assertFalse(posted["auto_orient"])
+        self.assertEqual(result["job_id"], 55)
+        self.assertEqual(result["mode"], "sidecar")
 
     def test_import_history_persists_file_and_source_links(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -390,3 +440,4 @@ class RememberedSessionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -495,6 +495,47 @@ async def prepare_slicer_action(file_id: int, user_agent: str = "") -> dict:
     }
 
 
+def normalize_preset_ref(value: object, slot: str) -> dict[str, str]:
+    """Validate a source-aware preset reference submitted by the slice dialog."""
+    if not isinstance(value, dict):
+        raise HTTPException(400, f"Choose a {slot} preset.")
+    source = str(value.get("source") or "")
+    preset_id = str(value.get("id") or "")
+    if source not in {"local", "orca_cloud", "cloud", "standard"} or not preset_id:
+        raise HTTPException(400, f"Choose a valid {slot} preset.")
+    return {"source": source, "id": preset_id}
+
+
+async def queue_slice_with_options(file_id: int, options: dict) -> dict:
+    """Queue a sidecar slice using the choices made in the importer dialog."""
+    file_response = await bambuddy_request("GET", f"/library/files/{int(file_id)}")
+    if file_response.status_code >= 400:
+        raise HTTPException(file_response.status_code, f"Could not load the Bambuddy file: {_response_detail(file_response)}")
+    filename = str(file_response.json().get("filename") or "")
+    if not is_sliceable_filename(filename):
+        raise HTTPException(400, "Only unsliced STL and 3MF model files can be sliced.")
+
+    body = {
+        "printer_preset": normalize_preset_ref(options.get("printer_preset"), "printer"),
+        "process_preset": normalize_preset_ref(options.get("process_preset"), "process"),
+        "filament_preset": normalize_preset_ref(options.get("filament_preset"), "filament"),
+        "filament_presets": [normalize_preset_ref(options.get("filament_preset"), "filament")],
+        "auto_orient": bool(options.get("auto_orient", False)),
+        "auto_arrange": bool(options.get("auto_arrange", False)),
+    }
+    bed_type = options.get("bed_type")
+    if bed_type:
+        if bed_type not in {"Cool Plate", "Engineering Plate", "High Temp Plate", "Textured PEI Plate", "Supertack Plate", "Textured Cool Plate"}:
+            raise HTTPException(400, "Choose a supported build plate.")
+        body["bed_type"] = bed_type
+
+    response = await bambuddy_request("POST", f"/library/files/{int(file_id)}/slice", json=body)
+    if response.status_code >= 400:
+        raise HTTPException(response.status_code, f"Bambuddy could not queue slicing: {_response_detail(response)}")
+    job = response.json()
+    return {**job, "mode": "sidecar"}
+
+
 def history_contains_file(file_id: int) -> bool:
     try:
         with sqlite3.connect(HISTORY_DB) as db:
@@ -1679,13 +1720,68 @@ async def api_history(x_importer_password: str | None = Header(default=None)) ->
 @app.post("/api/history/{file_id}/slice")
 async def api_history_slice(
     file_id: int,
+    options: dict,
     user_agent: str | None = Header(default=None, alias="User-Agent"),
     x_importer_password: str | None = Header(default=None),
 ) -> dict:
     check_password(x_importer_password)
     if not history_contains_file(file_id):
         raise HTTPException(404, "This file is not in the importer's download history.")
+    settings_response = await bambuddy_request("GET", "/settings/ui-flags")
+    if settings_response.status_code >= 400:
+        raise HTTPException(settings_response.status_code, f"Could not read Bambuddy's slicer settings: {_response_detail(settings_response)}")
+    settings = settings_response.json()
+    if settings.get("use_slicer_api") is True:
+        return await queue_slice_with_options(file_id, options)
     return await prepare_slicer_action(file_id, user_agent or "")
+
+
+@app.get("/api/history/{file_id}/slice-options")
+async def api_history_slice_options(
+    file_id: int,
+    x_importer_password: str | None = Header(default=None),
+) -> dict:
+    check_password(x_importer_password)
+    if not history_contains_file(file_id):
+        raise HTTPException(404, "This file is not in the importer's download history.")
+    settings_response = await bambuddy_request("GET", "/settings/ui-flags")
+    if settings_response.status_code >= 400:
+        raise HTTPException(settings_response.status_code, f"Could not read Bambuddy's slicer settings: {_response_detail(settings_response)}")
+    settings = settings_response.json()
+    if settings.get("use_slicer_api") is not True:
+        action = await prepare_slicer_action(file_id, "")
+        return {"mode": "desktop", "slicer": action["slicer"], "slicer_url": action["slicer_url"]}
+    file_response = await bambuddy_request("GET", f"/library/files/{int(file_id)}")
+    if file_response.status_code >= 400:
+        raise HTTPException(file_response.status_code, f"Could not load the Bambuddy file: {_response_detail(file_response)}")
+    if not is_sliceable_filename(str(file_response.json().get("filename") or "")):
+        raise HTTPException(400, "Only unsliced STL and 3MF model files can be sliced.")
+    presets_response = await bambuddy_request("GET", "/slicer/presets")
+    if presets_response.status_code >= 400:
+        raise HTTPException(presets_response.status_code, f"Could not read Bambuddy slicer presets: {_response_detail(presets_response)}")
+    return {"mode": "sidecar", "presets": presets_response.json()}
+
+
+@app.get("/api/history/slice-jobs/{job_id}")
+async def api_history_slice_job(
+    job_id: int,
+    file_id: int,
+    x_importer_password: str | None = Header(default=None),
+) -> dict:
+    check_password(x_importer_password)
+    if not history_contains_file(file_id):
+        raise HTTPException(404, "This file is not in the importer's download history.")
+    response = await bambuddy_request("GET", f"/slice-jobs/{int(job_id)}")
+    if response.status_code >= 400:
+        raise HTTPException(response.status_code, f"Could not check the slice job in Bambuddy: {_response_detail(response)}")
+    job = response.json()
+    if job.get("source_id") is not None and int(job["source_id"]) != int(file_id):
+        raise HTTPException(404, "This slice job does not belong to the selected history file.")
+    result = job.get("result") or {}
+    output_id = result.get("library_file_id") or result.get("file_id")
+    if output_id is not None:
+        job["file_url"] = f"{BAMBUDDY_URL.rstrip('/')}/files?highlight={int(output_id)}"
+    return job
 
 
 @app.get("/api/history/{file_id}/thumbnail")
@@ -1810,6 +1906,7 @@ label{display:block;font-weight:600;font-size:14px;margin-bottom:7px}input{width
 .file{display:flex;align-items:center;justify-content:flex-start;gap:12px;border-top:1px solid var(--line);padding:13px 0}.file:first-child{border-top:0}.file input[type=checkbox]{width:21px;height:21px;flex:0 0 auto;margin:0;accent-color:var(--accent)}.file-info{flex:1;min-width:0}.file small{display:block;color:var(--muted);margin-top:3px;overflow-wrap:anywhere}
 .file-actions{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:14px 0}.selection-count{color:var(--muted);font-size:13px;margin-left:10px}.tag-list{display:flex;gap:7px;flex-wrap:wrap;margin:12px 0}.tag-chip{font-size:12px;padding:4px 9px;border:1px solid #4b5563;background:#111827;border-radius:999px;color:#d1d5db}
 .history-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}.history-card{overflow:hidden;border:1px solid var(--line);border-radius:12px;background:#111827}.history-card img{width:100%;height:150px;object-fit:cover;background:#1f2937}.history-card-body{padding:12px}.history-card a{color:#86efac}.history-actions{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}.history-actions a,.history-actions button{padding:7px 9px;border-radius:7px;background:#374151;text-decoration:none;font-size:13px;color:var(--text);border:1px solid #4b5563}.history-actions button:disabled{opacity:.45;cursor:not-allowed}.history-feedback{display:block;color:var(--muted);font-size:12px;margin-top:8px;white-space:pre-wrap}
+dialog{width:min(560px,calc(100% - 28px));max-height:90vh;overflow:auto;border:1px solid var(--line);border-radius:14px;background:var(--panel);color:var(--text);padding:20px}dialog::backdrop{background:#000b}.slice-dialog-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}.slice-dialog-head h2{margin:0 0 6px}.slice-dialog select{width:100%;padding:11px;border:1px solid #4b5563;border-radius:8px;background:#111827;color:var(--text);font:inherit;margin-bottom:12px}.slice-dialog .check{display:flex;align-items:center;gap:9px;font-weight:500;margin:8px 0}.slice-dialog .check input{width:18px;min-width:18px;height:18px;accent-color:var(--accent)}
 .status{white-space:pre-wrap;padding:12px;border-radius:9px;background:#111827;color:#d1d5db;margin-top:12px;display:none}.status.error{color:#fecaca;border:1px solid #7f1d1d}.hint{font-size:13px}.hidden{display:none!important}.tag{color:#86efac;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.06em}
 @media(max-width:560px){.row{flex-direction:column}.row button{width:100%}.file-actions{align-items:stretch;flex-direction:column}.file-actions button{width:100%}.selection-count{margin-left:0}.file{align-items:flex-start}}
 </style></head><body><main>
@@ -1841,19 +1938,37 @@ label{display:block;font-weight:600;font-size:14px;margin-bottom:7px}input{width
  <div class="panel"><label for="directUrl">Direct model-file URL</label><div class="row"><input id="directUrl" type="url" placeholder="https://example.com/model.3mf"><button id="directImport" class="secondary">Import file</button></div><p class="hint">This must be a direct file-download URL, not a model's web page.</p><div id="directStatus" class="status"></div></div>
  <div class="panel"><h2 style="font-size:18px">Download history</h2><div id="historyList" class="history-grid">No downloads in this browser yet.</div></div>
 </section>
-<p class="hint">After import, open Bambuddy → File Manager, select the new file, then use the OrcaSlicer sidecar to slice it.</p>
+<p class="hint">After import, use the history card to open the file in Bambuddy File Manager or choose Slice to configure and run a slice.</p>
 </main>
+<dialog id="sliceDialog" class="slice-dialog">
+ <div class="slice-dialog-head"><div><h2>Slice model</h2><p id="sliceFilename" class="hint" style="margin:0 0 16px"></p></div><button id="closeSlice" class="secondary" type="button" aria-label="Close">✕</button></div>
+ <label for="slicePrinter">Printer</label><select id="slicePrinter"></select>
+ <label for="sliceProcess">Process settings</label><select id="sliceProcess"></select>
+ <label for="sliceFilament">Filament</label><select id="sliceFilament"></select>
+ <label for="sliceBed">Build plate</label><select id="sliceBed"><option value="">Use process preset default</option><option>Cool Plate</option><option>Engineering Plate</option><option>High Temp Plate</option><option>Textured PEI Plate</option><option>Supertack Plate</option><option>Textured Cool Plate</option></select>
+ <label class="check"><input id="sliceAutoArrange" type="checkbox"> Automatically arrange objects</label>
+ <label class="check"><input id="sliceAutoOrient" type="checkbox"> Automatically orient objects</label>
+ <div id="sliceStatus" class="status"></div>
+ <div class="row" style="justify-content:flex-end;margin-top:16px"><button id="cancelSlice" class="secondary" type="button">Cancel</button><button id="submitSlice" type="button">Slice</button></div>
+</dialog>
 <script>
 let importerPassword='';let currentModel=null;
 const $=id=>document.getElementById(id);
 function showStatus(id,message,error=false){const el=$(id);el.textContent=message;el.classList.remove('hidden');el.style.display='block';el.classList.toggle('error',error)}
 async function api(path,body){const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-Importer-Password':importerPassword},body:JSON.stringify(body)});let data={};try{data=await response.json()}catch{}if(!response.ok)throw new Error(data.detail||('HTTP '+response.status));return data}
+async function getApi(path){const response=await fetch(path,{headers:{'X-Importer-Password':importerPassword}});let data={};try{data=await response.json()}catch{}if(!response.ok)throw new Error(data.detail||('HTTP '+response.status));return data}
 async function loadFolders(){const r=await fetch('/api/folders',{headers:{'X-Importer-Password':importerPassword}});if(!r.ok)return;const rows=await r.json();const select=$('destinationFolder');select.replaceChildren(new Option('Library root',''));rows.forEach(f=>select.add(new Option(f.name,f.id)))}
 function selectedFiles(){return [...document.querySelectorAll('.file-check:checked')].map(box=>box._modelFile)}
 function updateSelection(){const files=selectedFiles();const count=files.length;$('selectionCount').textContent=count+' selected';$('importSelected').disabled=count===0;const name=files[0]&&files[0].name||'';const sliceable=count===1&&/\.(stl|3mf)$/i.test(name)&&!/\.gcode\.3mf$/i.test(name);$('saveSlice').disabled=!sliceable}
 let sliceAfterSave=false;
 function openSlicerProtocol(url){const link=document.createElement('a');link.href=url;link.style.display='none';document.body.appendChild(link);link.click();link.remove()}
-async function sliceHistoryFile(fileId,filename,feedback,button){button.disabled=true;feedback.textContent='Preparing Bambuddy slicer…';try{const action=await api('/api/history/'+encodeURIComponent(fileId)+'/slice',{});if(action.mode==='desktop'){openSlicerProtocol(action.slicer_url);feedback.textContent='Opening '+action.slicer+' on this device.';const fallback=document.createElement('a');fallback.href=action.slicer_url;fallback.textContent='If it did not open, click to launch '+action.slicer;feedback.append(document.createElement('br'),fallback)}else{feedback.textContent='Slice job '+(action.job_id||'queued')+' queued in Bambuddy’s '+action.slicer+' sidecar.'}}catch(e){feedback.textContent='Could not start slicing: '+e.message}finally{button.disabled=false}}
+let pendingSlice=null;
+function browserAddressSpace(url){const host=new URL(url).hostname.toLowerCase();if(host==='localhost'||host.endsWith('.localhost')||host==='::1'||/^127\./.test(host))return'loopback';if(host.endsWith('.local')||host.endsWith('.lan'))return'local';const p=host.split('.').map(Number);if(p.length===4&&p.every(n=>Number.isInteger(n)&&n>=0&&n<=255)&&(p[0]===10||(p[0]===172&&p[1]>=16&&p[1]<=31)||(p[0]===192&&p[1]===168)||(p[0]===169&&p[1]===254)))return'local';return null}
+async function openHistoryFile(url,feedback){const space=browserAddressSpace(url);if(!space){window.location.assign(url);return}try{await fetch(url,{mode:'no-cors',credentials:'omit',targetAddressSpace:space});window.location.assign(url)}catch(e){feedback.textContent='Your browser blocked the connection to Bambuddy on your local network. Allow Local network access for this importer site in the browser’s site settings, then reload and try again.'}}
+function addPresetOptions(select,presets,slot){select.replaceChildren();for(const tier of ['local','orca_cloud','cloud','standard']){const entries=presets[tier]?.[slot]||[];if(!entries.length)continue;const group=document.createElement('optgroup');group.label=({local:'Local',orca_cloud:'Orca Cloud',cloud:'Bambu Cloud',standard:'Standard'})[tier];for(const item of entries){if(item.id==null)continue;const option=new Option(item.name||String(item.id),(item.source||tier)+':'+item.id);group.append(option)}select.append(group)}if(!select.options.length)throw new Error('Bambuddy has no available '+slot+' presets.')}
+async function openSliceDialog(fileId,filename,feedback,button){button.disabled=true;feedback.textContent='Loading slicer options…';try{const data=await getApi('/api/history/'+encodeURIComponent(fileId)+'/slice-options');if(data.mode==='desktop'){openSlicerProtocol(data.slicer_url);feedback.textContent='Opening '+data.slicer+' on this device. Adjust print settings in the slicer.';button.disabled=false;return}addPresetOptions($('slicePrinter'),data.presets,'printer');addPresetOptions($('sliceProcess'),data.presets,'process');addPresetOptions($('sliceFilament'),data.presets,'filament');pendingSlice={fileId,feedback,button};$('sliceFilename').textContent=filename;$('sliceStatus').style.display='none';$('sliceDialog').showModal();feedback.textContent='Select printer and slicing settings.'}catch(e){feedback.textContent='Could not load slicing options: '+e.message;button.disabled=false}}
+async function waitForSliceJob(jobId,fileId){for(let attempt=0;attempt<120;attempt++){await new Promise(resolve=>setTimeout(resolve,2000));const job=await getApi('/api/history/slice-jobs/'+encodeURIComponent(jobId)+'?file_id='+encodeURIComponent(fileId));if(job.status==='failed')throw new Error(job.error_detail||'The Bambuddy sidecar reported a slice failure.');if(job.status==='completed'){const result=job.result||{};const outputId=result.library_file_id||result.file_id;return{job,result,outputId,fileUrl:job.file_url}}$('sliceStatus').textContent='Slicing… '+(job.progress?.stage||job.status||'in progress')+(job.progress?.total_percent?` (${Math.round(job.progress.total_percent)}%)`:'')}throw new Error('Slice is still running. Check Bambuddy’s slicer jobs for job '+jobId+'.')}
+async function submitHistorySlice(){if(!pendingSlice)return;const p=pendingSlice;const preset=(id)=>{const [source,...rest]=$(id).value.split(':');return{source,id:rest.join(':')}};const options={printer_preset:preset('slicePrinter'),process_preset:preset('sliceProcess'),filament_preset:preset('sliceFilament'),bed_type:$('sliceBed').value||null,auto_arrange:$('sliceAutoArrange').checked,auto_orient:$('sliceAutoOrient').checked};const submit=$('submitSlice');submit.disabled=true;$('sliceStatus').style.display='block';$('sliceStatus').classList.remove('error');$('sliceStatus').textContent='Sending slice to Bambuddy…';try{const result=await api('/api/history/'+encodeURIComponent(p.fileId)+'/slice',options);if(result.job_id){$('sliceStatus').textContent='Slice queued. Waiting for Bambuddy’s sidecar…';const completed=await waitForSliceJob(result.job_id,p.fileId);const outputId=completed.outputId;p.feedback.textContent='Slice complete.';if(outputId&&completed.fileUrl){const link=document.createElement('a');link.href=completed.fileUrl;link.target='_self';link.textContent='Open sliced file in File Manager';link.style.display='block';link.style.marginTop='8px';$('sliceStatus').replaceChildren(document.createTextNode(`Slice complete: ${completed.result.name||'output file'}. `),link)}else{$('sliceStatus').textContent='Slice complete. Check the source folder in Bambuddy File Manager.'}setTimeout(()=>$('sliceDialog').close(),5000)}else{$('sliceStatus').textContent='Bambuddy accepted the slice request.';p.feedback.textContent='Slice accepted by Bambuddy.'}}catch(e){$('sliceStatus').classList.add('error');$('sliceStatus').textContent='Slice failed or could not be confirmed: '+e.message;p.feedback.textContent='Slice failed: '+e.message}finally{submit.disabled=false;p.button.disabled=false;pendingSlice=null}}
 
 async function renderHistory(){
  const root=$('historyList');root.replaceChildren();
@@ -1867,12 +1982,12 @@ async function renderHistory(){
    const img=document.createElement('img');img.src=x.thumbnail_url;img.alt=x.title;img.loading='lazy';img.onerror=()=>{img.style.display='none'};
    const body=document.createElement('div');body.className='history-card-body';
    const title=document.createElement('strong');title.textContent=x.title||x.filename;
-   const file=document.createElement('div');const fileLink=document.createElement('a');fileLink.href=x.file_url;fileLink.textContent=x.filename;file.append(fileLink);
+   const file=document.createElement('div');const fileLink=document.createElement('a');fileLink.href=x.file_url;fileLink.target='_self';fileLink.textContent=x.filename;fileLink.onclick=e=>{e.preventDefault();openHistoryFile(x.file_url,feedback)};file.append(fileLink);
    const actions=document.createElement('div');actions.className='history-actions';
-   const fileAction=document.createElement('a');fileAction.href=x.file_url;fileAction.textContent='▤ File';actions.append(fileAction);
+   const fileAction=document.createElement('a');fileAction.href=x.file_url;fileAction.target='_self';fileAction.textContent='▤ File';fileAction.onclick=e=>{e.preventDefault();openHistoryFile(x.file_url,feedback)};actions.append(fileAction);
    const slice=document.createElement('button');slice.type='button';slice.textContent='▶ Slice';slice.disabled=!x.can_slice;slice.title=x.can_slice?'Use Bambuddy’s configured slicer':'Only unsliced STL and 3MF files can be sliced';
    const feedback=document.createElement('small');feedback.className='history-feedback';
-   slice.onclick=()=>sliceHistoryFile(x.file_id,x.filename,feedback,slice);actions.append(slice);
+   slice.onclick=()=>openSliceDialog(x.file_id,x.filename,feedback,slice);actions.append(slice);
    if(x.url){const site=document.createElement('a');site.href=x.url;site.textContent='↗ Website';actions.append(site)}
    body.append(title,file,actions,feedback);card.append(img,body);root.append(card);
   });
@@ -1926,7 +2041,7 @@ $('forgetLogin').onclick=()=>{
  $('loginPanel').classList.remove('hidden');
  showStatus('loginStatus','Saved login removed from this browser.',false);
 };
-saveSlice.onclick=()=>{sliceAfterSave=true;importSelected.click()}; resolve.addEventListener('click',()=>loadFolders()); restoreRememberedSession();
+saveSlice.onclick=()=>{sliceAfterSave=true;importSelected.click()}; resolve.addEventListener('click',()=>loadFolders());$('closeSlice').onclick=()=>$('sliceDialog').close();$('cancelSlice').onclick=()=>$('sliceDialog').close();$('submitSlice').onclick=submitHistorySlice;restoreRememberedSession();
 $('selectAll').onclick=()=>{const boxes=[...document.querySelectorAll('.file-check')];const all=boxes.length>0&&boxes.every(box=>box.checked);boxes.forEach(box=>box.checked=!all);$('selectAll').textContent=all?'Select all':'Clear selection';updateSelection()};
 $('resolve').onclick=async()=>{const url=$('modelUrl').value.trim();if(!url)return showStatus('resolveStatus','Paste a model URL first.',true);$('resolve').disabled=true;$('modelPanel').classList.add('hidden');try{currentModel=await api('/api/resolve',{url:url});$('source').textContent=currentModel.source;$('modelTitle').textContent=currentModel.title;$('fileList').replaceChildren();$('sourceTags').replaceChildren();const sourceTags=currentModel.tags||[];if(sourceTags.length){const heading=document.createElement('strong');heading.textContent='Source tags:';$('sourceTags').append(heading);sourceTags.forEach(name=>{const chip=document.createElement('span');chip.className='tag-chip';chip.textContent=name;$('sourceTags').append(chip)});$('sourceTags').classList.remove('hidden')}else{$('sourceTags').classList.add('hidden')}for(const file of currentModel.files){const row=document.createElement('div');row.className='file';const checkbox=document.createElement('input');checkbox.type='checkbox';checkbox.className='file-check';checkbox._modelFile=file;checkbox.addEventListener('change',updateSelection);const info=document.createElement('div');info.className='file-info';const title=document.createElement('strong');title.textContent=file.name;const sub=document.createElement('small');const size=file.size?' • '+(Number(file.size)/1048576).toFixed(2)+' MB':'';sub.textContent=(file.kind||'file')+size+(file.note?' • '+file.note:'');info.append(title,sub);row.append(checkbox,info);$('fileList').append(row)}$('selectAll').textContent='Select all';updateSelection();$('modelPanel').classList.remove('hidden');showStatus('resolveStatus','Found '+currentModel.files.length+' supported file(s). Select the parts to import together.')}catch(e){showStatus('resolveStatus',e.message,true)}finally{$('resolve').disabled=false}};
 $('importSelected').onclick=async()=>{
@@ -1952,3 +2067,4 @@ $('importSelected').onclick=async()=>{
 };
 $('directImport').onclick=async()=>{const url=$('directUrl').value.trim();if(!url)return showStatus('directStatus','Paste a direct HTTPS file URL first.',true);$('directImport').disabled=true;try{const result=await api('/api/import-direct',{url});let message='Imported '+(result.filename||'file')+' into Bambuddy.';if(result.tag_warning)message+='\nTag warning: '+result.tag_warning;if(result.external_link_warning)message+='\nExternal link warning: '+result.external_link_warning;showStatus('directStatus',message)}catch(e){showStatus('directStatus',e.message,true)}finally{$('directImport').disabled=false}};
 </script></body></html>'''
+

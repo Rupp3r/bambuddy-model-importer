@@ -27,7 +27,7 @@ The importer runs as a separate service. It does not replace or modify Bambuddy.
 - Configurable maximum download size.
 - Choose a Bambuddy File Manager folder, optionally create a title-named subfolder, and override the imported title.
 - Set each imported file's External link to the original model page and add a `Source: <URL>` tag when that label fits Bambuddy's 64-character tag-name limit. The External link always retains the full URL.
-- Keep a persistent, thumbnail-backed import history with File, Slice and Website actions. File and Website open in the same tab. Slice opens the configured desktop slicer or queues slicing through the configured Bambuddy sidecar.
+- Keep a persistent, thumbnail-backed import history with File, Slice and Website actions. File and Website open in the same tab. Sidecar slicing opens a settings dialog for printer, process and filament presets, build plate, auto-arrange and auto-orient; the importer then tracks Bambuddy's slice job and reports failures or links to the completed file. Desktop mode opens the configured desktop slicer.
 - Save and slice one unsliced STL or 3MF. Multi-file selections and G-code files are save-only.
 - Resolve MakerWorld plates through Bambuddy's native Model Sources API. This requires the configured API key to have MakerWorld/cloud permissions available to its owner.
 
@@ -101,7 +101,9 @@ The extension requires CORS access from browser-extension origins on the importe
 6. When the source provides tags or categories, the importer displays them before import, reuses matching Bambuddy tags or creates missing tags, then assigns those tags to the imported files. It also sets the file's External link to the model page and adds a Source URL tag where Bambuddy's tag-name limit allows it.
 7. The importer downloads the selected files server-side and uploads them to Bambuddy's library API. You can choose a destination folder, create a title-named subfolder, and override the title.
 8. Choose **Save** or **Save and slice** for one STL or unsliced 3MF. Multi-file selections and G-code are save-only. The Slice action follows Bambuddy's configured desktop slicer or queues the configured API sidecar.
-9. Use the import history cards to open the saved file in File Manager, start slicing, or revisit the source website. File and Website links stay in the current tab.
+9. Use the import history cards to open the saved file in File Manager, start slicing, or revisit the source website. File and Website links stay in the current tab. Sidecar slicing opens a settings dialog and tracks the background job to completion; desktop mode launches the configured desktop slicer.
+
+If the importer is served from a public HTTPS address while Bambuddy is on a private LAN address, the browser may require **Local network** access for the importer site before it can open Bambuddy's File Manager. Allow that permission in the browser's site settings. Chrome's Local Network Access permission protects public-to-LAN requests; the importer prompts from a user click before handing off to a private address.
 
 Slicing uses Bambuddy's configured slicer. The importer does not start a print.
 
@@ -205,3 +207,4 @@ python -m unittest discover -s tests -v
 ```
 
 The health endpoint is available at `/health`.
+
