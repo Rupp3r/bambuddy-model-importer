@@ -49,6 +49,7 @@ class SourceUrlParsingTests(unittest.TestCase):
 
     def test_makerworld_model_url(self):
         self.assertEqual(parse_makerworld_id("https://makerworld.com/en/models/123456"), "123456")
+        self.assertEqual(parse_makerworld_id("https://makerworld.com/en/models/123456-bird-feeder"), "123456")
         self.assertIsNone(parse_makerworld_id("https://makerworld.com.attacker.invalid/models/123456"))
 
     def test_shapekit_model_url(self):
