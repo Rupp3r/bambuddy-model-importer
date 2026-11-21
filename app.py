@@ -183,7 +183,7 @@ def parse_shapekit_slug(url: str) -> str | None:
 def parse_makerworld_id(url: str) -> str | None:
     parsed=_parsed_url(url)
     if (parsed.hostname or "").lower() not in {"makerworld.com","www.makerworld.com"}: return None
-    m=re.match(r"^/(?:[a-z]{2}(?:-[a-z]{2})?/)?models/(\d+)(?:/|$)",parsed.path,re.I)
+    m=re.match(r"^/(?:[a-z]{2}(?:-[a-z]{2})?/)?models/(\d+)(?:[-/]|$)",parsed.path,re.I)
     return m.group(1) if m else None
 
 
