@@ -190,6 +190,11 @@ def parse_makerworld_id(url: str) -> str | None:
 async def resolve_makerworld(url: str) -> dict:
     model_id=parse_makerworld_id(url)
     if not model_id: raise HTTPException(400,"Paste a MakerWorld /models/{id} URL.")
+    status=await bambuddy_request("GET","/makerworld/status")
+    if status.status_code>=400:
+        raise HTTPException(status.status_code,"Bambuddy could not check MakerWorld access. Ensure the API key has MakerWorld access.")
+    if not status.json().get("can_download"):
+        raise HTTPException(400,"Bambuddy cannot download MakerWorld models for this API key. Enable 'Allow Bambu Cloud access' for the API key in Bambuddy, and make sure the MakerWorld tab can download models.")
     response=await bambuddy_request("POST","/makerworld/resolve",json={"url":url})
     if response.status_code>=400:
         try: detail=response.json().get("detail",response.text)
