@@ -1,4 +1,10 @@
 import unittest
+import asyncio
+import tempfile
+from pathlib import Path
+from unittest.mock import patch
+
+import app as importer
 
 from app import (
     SESSION_TOKEN_TTL_SECONDS,
@@ -11,6 +17,8 @@ from app import (
     parse_nasa_slug,
     parse_nih_id,
     parse_printables_id,
+    parse_makerworld_id,
+    parse_shapekit_slug,
     parse_smithsonian_id,
     parse_thingiverse_id,
     parse_wikimedia_title,
@@ -23,6 +31,29 @@ from app import (
 
 
 class SourceUrlParsingTests(unittest.TestCase):
+    def test_shapekit_page_resolves_public_zip(self):
+        class Response:
+            url="https://shapekit.cc/bird-feeder"
+            text='<html><title>Bird Feeder | Shapekit</title><a href="/downloads/bird-feeder.zip">Download</a></html>'
+            def raise_for_status(self): pass
+        class Client:
+            def __init__(self,*args,**kwargs): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self,*args): pass
+            async def get(self,url): return Response()
+        with patch.object(importer.httpx,"AsyncClient",Client):
+            result=asyncio.run(importer.resolve_shapekit("https://shapekit.cc/bird-feeder"))
+        self.assertEqual(result["title"],"Bird Feeder")
+        self.assertEqual(result["files"][0]["kind"],"shapekit_zip")
+        self.assertEqual(result["files"][0]["download_url"],"https://shapekit.cc/downloads/bird-feeder.zip")
+
+    def test_makerworld_model_url(self):
+        self.assertEqual(parse_makerworld_id("https://makerworld.com/en/models/123456"), "123456")
+        self.assertIsNone(parse_makerworld_id("https://makerworld.com.attacker.invalid/models/123456"))
+
+    def test_shapekit_model_url(self):
+        self.assertEqual(parse_shapekit_slug("https://shapekit.cc/bird-feeder"), "bird-feeder")
+        self.assertIsNone(parse_shapekit_slug("https://shapekit.cc.attacker.example/bird-feeder"))
     def test_printables_model_url(self):
         self.assertEqual(
             parse_printables_id("https://www.printables.com/model/123456-example"),
@@ -160,6 +191,16 @@ class SourceUrlParsingTests(unittest.TestCase):
 
 
 class ImportOrganizationTests(unittest.TestCase):
+    def test_import_history_persists_file_and_source_links(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(importer, "HISTORY_DB", Path(directory) / "history.sqlite3"):
+                importer.save_history({"title":"Bird Feeder","source":"Shapekit","source_url":"https://shapekit.cc/bird-feeder",
+                    "imported_files":[{"id":42,"filename":"tray.stl"}]})
+                rows=importer.read_history()
+        self.assertEqual(rows[0]["file_id"],"42")
+        self.assertEqual(rows[0]["url"],"https://shapekit.cc/bird-feeder")
+        self.assertEqual(rows[0]["filename"],"tray.stl")
+
     def test_source_tags_are_normalized_and_deduplicated(self):
         self.assertEqual(
             normalize_source_tags(
@@ -243,3 +284,4 @@ class RememberedSessionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

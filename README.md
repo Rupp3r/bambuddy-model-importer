@@ -25,16 +25,21 @@ The importer runs as a separate service. It does not replace or modify Bambuddy.
 - Upload selected files to Bambuddy through its library API.
 - Password-protected web interface.
 - Configurable maximum download size.
+- Choose a Bambuddy File Manager folder, optionally create a title-named subfolder, and override the imported title.
+- Keep a persistent local import history with links to Bambuddy files and their source pages.
+- Resolve MakerWorld plates through Bambuddy's native Model Sources API. This requires the configured API key to have MakerWorld/cloud permissions available to its owner.
 
 ### Supported file formats
 
-STL, 3MF, STEP, STP, OBJ and AMF.
+STL, 3MF, G-code, STEP, STP, OBJ and AMF.
 
 ## Sources that do not require an account
 
 | Source | Accepted URL | What can be imported |
 |---|---|---|
 | [Printables](https://www.printables.com/) | Public/free model page | Public/free model files. Paid, Club-only or otherwise restricted files may not be downloadable anonymously. |
+| [Shapekit](https://shapekit.cc/3d-models) | Public model page, e.g. `https://shapekit.cc/bird-feeder` | Public STL/3MF and ZIP downloads exposed by the page. ZIP imports are expanded into supported model files. |
+| [MakerWorld](https://makerworld.com/) | Public `/models/{id}` URL | Plate downloads use Bambuddy's built-in MakerWorld resolve/import endpoints and stored Bambu Cloud credentials. |
 | [NASA 3D Resources](https://science.nasa.gov/3d-resources/) | Folder or file page in the [official NASA 3D Resources GitHub repository](https://github.com/nasa/NASA-3D-Resources) | Supported printable files found in that repository folder. The GitHub API is used without a personal token. |
 | [NIH 3D](https://3d.nih.gov/) | Public entry page, e.g. `https://3d.nih.gov/entries/3DPX-000914` | Published submission files in supported formats. Uses the public entry and download endpoints; no API key or NIH account is needed. Each model has its own licence. |
 | [Smithsonian 3D](https://3d.si.edu/) | Public 3D object page | Public print-ready STL files exposed by the Smithsonian 3D API. Some objects do not have an STL download. Check the individual object's usage conditions before reuse. |
@@ -190,3 +195,4 @@ python -m unittest discover -s tests -v
 ```
 
 The health endpoint is available at `/health`.
+

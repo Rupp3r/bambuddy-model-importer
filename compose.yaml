@@ -4,6 +4,9 @@ services:
     restart: unless-stopped
     pull_policy: always
 
+    volumes:
+      - importer-history:/data
+
     ports:
       - "${IMPORTER_PORT:-8097}:8000"
 
@@ -18,3 +21,7 @@ services:
       IMPORTER_PASSWORD: "${IMPORTER_PASSWORD:?Set IMPORTER_PASSWORD}"
       THINGIVERSE_TOKEN: "${THINGIVERSE_TOKEN:-}"
       MAX_DOWNLOAD_MB: "${MAX_DOWNLOAD_MB:-512}"
+
+volumes:
+  importer-history:
+

@@ -11,6 +11,7 @@ import socket
 import io
 import zipfile
 import time
+import sqlite3
 from html import unescape
 from pathlib import Path, PurePosixPath
 from urllib.parse import urljoin, urlparse, unquote, quote, parse_qs
@@ -39,7 +40,8 @@ ARCHIVE_METADATA = "https://archive.org/metadata/"
 ARCHIVE_DOWNLOAD = "https://archive.org/download/"
 NASA_TREE_CACHE: dict = {"expires_at": 0.0, "tree": []}
 POLYHAVEN_API = "https://api.polyhaven.com"
-ALLOWED_EXTENSIONS = {".stl", ".3mf", ".step", ".stp", ".obj", ".amf"}
+ALLOWED_EXTENSIONS = {".stl", ".3mf", ".gcode", ".step", ".stp", ".obj", ".amf"}
+HISTORY_DB = Path(os.environ.get("IMPORTER_HISTORY_DB", "/data/history.sqlite3"))
 
 EXTENSION_CONTRACT_PATH = Path(__file__).resolve().parent / "extension" / "api-contract.json"
 with EXTENSION_CONTRACT_PATH.open("r", encoding="utf-8") as contract_file:
@@ -83,6 +85,10 @@ class ImportSelection(BaseModel):
 class BatchImportRequest(BaseModel):
     url: str = Field(min_length=8, max_length=2048)
     files: list[ImportSelection] = Field(min_length=1, max_length=100)
+    folder_id: int | None = None
+    create_subfolder: bool = False
+    title: str | None = Field(default=None, max_length=255)
+    save_and_slice: bool = False
 
 
 PRINTABLES_FILES_QUERY = """
@@ -164,6 +170,84 @@ def parse_printables_id(url: str) -> str | None:
         return None
     match = re.search(r"/(?:[a-z]{2}(?:-[a-z]{2,4})?/)?model/(\d+)(?:[-/]|$)", parsed.path, re.I)
     return match.group(1) if match else None
+
+
+def parse_shapekit_slug(url: str) -> str | None:
+    parsed = _parsed_url(url)
+    if (parsed.hostname or "").lower() not in {"shapekit.cc", "www.shapekit.cc"}:
+        return None
+    match = re.fullmatch(r"/([a-z0-9][a-z0-9-]*)/?", parsed.path, re.I)
+    return match.group(1) if match else None
+
+
+def parse_makerworld_id(url: str) -> str | None:
+    parsed=_parsed_url(url)
+    if (parsed.hostname or "").lower() not in {"makerworld.com","www.makerworld.com"}: return None
+    m=re.match(r"^/(?:[a-z]{2}(?:-[a-z]{2})?/)?models/(\d+)(?:/|$)",parsed.path,re.I)
+    return m.group(1) if m else None
+
+
+async def resolve_makerworld(url: str) -> dict:
+    model_id=parse_makerworld_id(url)
+    if not model_id: raise HTTPException(400,"Paste a MakerWorld /models/{id} URL.")
+    response=await bambuddy_request("POST","/makerworld/resolve",json={"url":url})
+    if response.status_code>=400:
+        try: detail=response.json().get("detail",response.text)
+        except Exception: detail=response.text
+        raise HTTPException(response.status_code,f"Bambuddy MakerWorld resolve failed: {detail}")
+    data=response.json(); design=data.get("design") or {}; instances=data.get("instances") or []
+    files=[]
+    for i,plate in enumerate(instances,1):
+        pid=plate.get("profileId") or plate.get("profile_id")
+        if pid is None: continue
+        files.append({"id":str(pid),"kind":"makerworld_plate","name":str(plate.get("name") or f"Plate {i}")+".3mf","size":None,"note":f"MakerWorld plate {i}"})
+    if not files: raise HTTPException(404,"Bambuddy found no downloadable plates for this MakerWorld model.")
+    return {"source":"MakerWorld via Bambuddy","title":design.get("title") or design.get("name") or f"MakerWorld {model_id}","url":url,"tags":normalize_source_tags(design.get("tags")),"files":files,"model_id":str(data.get("model_id") or model_id)}
+
+
+class _ShapekitLinks:
+    """Collect downloadable model links from Shapekit's public model page."""
+    def __init__(self):
+        from html.parser import HTMLParser
+        class Parser(HTMLParser):
+            def __init__(self):
+                super().__init__(); self.links=[]; self.title=False; self.title_parts=[]
+            def handle_starttag(self, tag, attrs):
+                attrs=dict(attrs)
+                if tag == "a" and attrs.get("href"):
+                    self.links.append((attrs["href"], attrs.get("download", "")))
+                if tag == "title": self.title=True
+            def handle_endtag(self, tag):
+                if tag == "title": self.title=False
+            def handle_data(self, data):
+                if self.title: self.title_parts.append(data)
+        self.parser=Parser()
+
+
+async def resolve_shapekit(url: str) -> dict:
+    slug=parse_shapekit_slug(url)
+    if not slug: raise HTTPException(400,"Paste a Shapekit model page URL.")
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(45, connect=15), follow_redirects=True,
+                headers={"User-Agent":"BambuddyModelImporter/1.0"}) as client:
+            response=await client.get(url); response.raise_for_status()
+    except httpx.HTTPError as exc: raise HTTPException(502,f"Could not load Shapekit model page: {exc}") from exc
+    collector=_ShapekitLinks(); collector.parser.feed(response.text)
+    files=[]; seen=set()
+    for href,download in collector.parser.links:
+        target=urljoin(str(response.url),href)
+        path=urlparse(target).path.lower()
+        if path.endswith(".zip"):
+            name=PurePosixPath(urlparse(target).path).name or f"{slug}.zip"
+            name=re.sub(r"[^A-Za-z0-9._ -]","_",name)
+            if target not in seen: files.append({"id":target,"kind":"shapekit_zip","name":name,"size":None,"download_url":target});seen.add(target)
+        elif PurePosixPath(path).suffix in ALLOWED_EXTENSIONS:
+            name=PurePosixPath(urlparse(target).path).name
+            if target not in seen: files.append({"id":target,"kind":"shapekit_file","name":safe_filename(name),"size":None,"download_url":target});seen.add(target)
+    if not files: raise HTTPException(404,"No public model downloads were found on this Shapekit page.")
+    title=next((x.strip() for x in collector.parser.title_parts if x.strip()),slug.replace("-"," "))
+    title=re.sub(r"\s*[|–-]\s*Shapekit\s*$","",title,flags=re.I).strip() or slug.replace("-"," ")
+    return {"source":"Shapekit","title":title,"url":url,"tags":[],"files":files}
 
 
 def parse_thingiverse_id(url: str) -> str | None:
@@ -308,11 +392,35 @@ async def bambuddy_request(method: str, path: str, **kwargs) -> httpx.Response:
         raise HTTPException(502, f"Could not connect to Bambuddy at {BAMBUDDY_URL}: {exc}") from exc
 
 
-async def create_bambuddy_folder(name: str) -> int:
+def save_history(result: dict) -> None:
+    """Keep a small local import history across container restarts."""
+    try:
+        HISTORY_DB.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(HISTORY_DB) as db:
+            db.execute("CREATE TABLE IF NOT EXISTS imports (id INTEGER PRIMARY KEY, created TEXT, title TEXT, source TEXT, url TEXT, file_id TEXT, filename TEXT)")
+            for item in result.get("imported_files", []):
+                if item.get("id") is not None:
+                    db.execute("INSERT INTO imports(created,title,source,url,file_id,filename) VALUES(datetime('now'),?,?,?,?,?)",
+                        (result.get("title"),result.get("source"),result.get("source_url"),str(item["id"]),item.get("filename") or item.get("name") or "Model"))
+    except (OSError, sqlite3.Error):
+        return
+
+
+def read_history(limit: int = 50) -> list[dict]:
+    try:
+        with sqlite3.connect(HISTORY_DB) as db:
+            db.row_factory=sqlite3.Row
+            rows=db.execute("SELECT * FROM imports ORDER BY id DESC LIMIT ?",(max(1,min(100,limit)),)).fetchall()
+            return [dict(row) for row in rows]
+    except (OSError, sqlite3.Error):
+        return []
+
+
+async def create_bambuddy_folder(name: str, parent_id: int | None = None) -> int:
     response = await bambuddy_request(
         "POST",
         "/library/folders",
-        json={"name": safe_folder_name(name)},
+        json={"name": safe_folder_name(name), "parent_id": parent_id},
     )
     if response.status_code >= 400:
         try:
@@ -430,6 +538,14 @@ async def bambuddy_upload(filename: str, payload: bytes, source_url: str, folder
     except ValueError as exc:
         raise HTTPException(502, "Bambuddy returned a non-JSON upload response.") from exc
     result["source_url"] = source_url
+    file_id = result.get("id")
+    if file_id is not None and source_url.startswith(("http://", "https://")):
+        try:
+            await bambuddy_request("PUT", f"/library/files/{int(file_id)}", json={"external_url": source_url})
+        except HTTPException:
+            # Keep a successful file import successful if a Bambuddy API key
+            # lacks file-metadata update permission.
+            pass
     return result
 
 async def printables_graphql(query: str, variables: dict) -> dict:
@@ -481,7 +597,7 @@ async def resolve_printables(url: str) -> dict:
     if not files:
         raise HTTPException(404, "No supported STL, 3MF, STEP, OBJ or AMF files were found. G-code, resin and ZIP packs are not offered by this importer.")
     is_paid = bool(model.get("premium")) or (model.get("price") not in (None, 0, "0", "0.0"))
-    return {
+    result = {
         "source": "Printables",
         "model_id": model_id,
         "title": model.get("name") or f"Printables model {model_id}",
@@ -490,6 +606,7 @@ async def resolve_printables(url: str) -> dict:
         "paid_or_club": is_paid,
         "files": files,
     }
+    return result
 
 
 async def import_printables(url: str, file_id: str, file_type: str, filename: str, folder_id: int | None = None) -> dict:
@@ -1172,6 +1289,10 @@ async def resolve_model_source(url: str) -> dict:
     """Resolve one supported model page while retaining server-side download URLs."""
     if parse_printables_id(url):
         return await resolve_printables(url)
+    if parse_shapekit_slug(url):
+        return await resolve_shapekit(url)
+    if parse_makerworld_id(url):
+        return await resolve_makerworld(url)
     if parse_thingiverse_id(url):
         return await resolve_thingiverse(url)
     if parse_nasa_github_folder(url):
@@ -1220,6 +1341,31 @@ async def import_resolved_file(url: str, selected: dict, folder_id: int | None) 
     kind = str(selected.get("kind") or "")
     if parse_printables_id(url):
         return await import_printables(url, file_id, kind, filename, folder_id=folder_id)
+    if parse_shapekit_slug(url):
+        download_url=selected.get("download_url") or file_id
+        if kind == "shapekit_zip":
+            payload=await download_public_file(download_url)
+            try:
+                with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+                    entries=[(entry, safe_filename(PurePosixPath(entry.filename).name)) for entry in archive.infolist()
+                             if not entry.is_dir() and PurePosixPath(entry.filename).suffix.lower() in ALLOWED_EXTENSIONS]
+                    if not entries: raise HTTPException(400,"The Shapekit ZIP contains no supported model files.")
+                    imported=[await bambuddy_upload(name,archive.read(entry),url,folder_id=folder_id) for entry,name in entries]
+                    return {"imported_files":imported,"source_url":url}
+            except zipfile.BadZipFile as exc: raise HTTPException(400,"The Shapekit download was not a valid ZIP file.") from exc
+        payload=await download_public_file(download_url)
+        return await bambuddy_upload(filename,payload,url,folder_id=folder_id)
+    if parse_makerworld_id(url):
+        model_id=parse_makerworld_id(url)
+        response=await bambuddy_request("POST","/makerworld/import",json={"model_id":int(model_id),"source_type":"makerworld","profile_id":int(file_id),"folder_id":folder_id})
+        if response.status_code>=400:
+            try: detail=response.json().get("detail",response.text)
+            except Exception: detail=response.text
+            raise HTTPException(response.status_code,f"Bambuddy MakerWorld import failed: {detail}")
+        data=response.json(); library_id=data.get("library_file_id")
+        if library_id and filename:
+            await bambuddy_request("PUT",f"/library/files/{int(library_id)}",json={"filename":filename,"external_url":url})
+        return {"id":library_id,"filename":filename,"source_url":url,"folder_id":data.get("folder_id")}
     if parse_thingiverse_id(url):
         return await import_thingiverse(url, file_id, filename, folder_id=folder_id)
     if parse_nasa_github_folder(url):
@@ -1258,11 +1404,12 @@ def needs_model_folder(url: str, selected_files: list[dict]) -> bool:
     return (
         len(selected_files) == 1
         and str(selected_files[0].get("name", "")).lower().endswith(".zip")
-        and bool(parse_smithsonian_id(url) or parse_archive_id(url))
+        and bool(parse_smithsonian_id(url) or parse_archive_id(url) or parse_shapekit_slug(url))
     )
 
 
-async def run_model_import(url: str, selections: list[ImportSelection]) -> dict:
+async def run_model_import(url: str, selections: list[ImportSelection], *, destination_folder_id: int | None = None,
+                           create_subfolder: bool = False, title_override: str | None = None) -> dict:
     resolved = await resolve_model_source(url)
     if resolved.get("source") == "Direct file URL":
         raise HTTPException(400, "Use the direct-file import field for direct HTTPS file URLs.")
@@ -1292,9 +1439,19 @@ async def run_model_import(url: str, selections: list[ImportSelection]) -> dict:
     # also get a folder when one archive expands into multiple model meshes.
     folder_id = None
     folder_name = None
-    if needs_model_folder(url, selected_files):
-        folder_name = safe_folder_name(str(resolved.get("title") or "Imported model"))
-        folder_id = await create_bambuddy_folder(folder_name)
+    chosen_title=(title_override or "").strip() or str(resolved.get("title") or "Imported model")
+    if destination_folder_id is not None:
+        folder_id=destination_folder_id
+    if create_subfolder or (destination_folder_id is None and needs_model_folder(url, selected_files)):
+        folder_name = safe_folder_name(chosen_title)
+        folder_id = await create_bambuddy_folder(folder_name, destination_folder_id)
+    if title_override:
+        for item in selected_files:
+            current=str(item.get("name") or "Model")
+            ext=PurePosixPath(current).suffix
+            if ext.lower()==".zip": continue
+            suffix=(" - "+PurePosixPath(current).stem) if len(selected_files)>1 else ""
+            item["name"]=safe_filename(chosen_title + suffix + ext)
 
     imported_results = []
     flattened_files = []
@@ -1330,9 +1487,9 @@ async def run_model_import(url: str, selections: list[ImportSelection]) -> dict:
         except HTTPException as exc:
             tag_warning = str(exc.detail)
 
-    return {
+    result = {
         "source": resolved.get("source"),
-        "title": resolved.get("title"),
+        "title": chosen_title,
         "source_url": url,
         "folder": {"id": folder_id, "name": folder_name} if folder_id is not None else None,
         "files_imported": len(flattened_files),
@@ -1341,6 +1498,11 @@ async def run_model_import(url: str, selections: list[ImportSelection]) -> dict:
         "tags_assigned": tags_assigned,
         "tag_warning": tag_warning,
     }
+    first_id=next((item.get("id") for item in flattened_files if item.get("id") is not None),None)
+    result["file_manager_url"]=f"{BAMBUDDY_URL}/files?highlight={first_id}" if first_id is not None else None
+    result["slice_url"]=(result["file_manager_url"]+"&slice=1") if result["file_manager_url"] else None
+    save_history(result)
+    return result
 
 
 @app.post("/api/extension/v1/session")
@@ -1356,6 +1518,16 @@ async def api_session(x_importer_password: str | None = Header(default=None)) ->
 @app.get("/health")
 async def health() -> dict:
     return {"status": "ok"}
+
+
+@app.get("/api/history")
+async def api_history(x_importer_password: str | None = Header(default=None)) -> list[dict]:
+    check_password(x_importer_password)
+    rows=read_history()
+    for row in rows:
+        row["file_url"]=f"{BAMBUDDY_URL}/files?highlight={row['file_id']}"
+        row["slice_url"]=row["file_url"]+"&slice=1"
+    return rows
 
 
 @app.get("/api/extension/v1/info")
@@ -1399,7 +1571,23 @@ async def api_import(body: ImportRequest, x_importer_password: str | None = Head
 @app.post("/api/import-batch")
 async def api_import_batch(body: BatchImportRequest, x_importer_password: str | None = Header(default=None)) -> dict:
     check_password(x_importer_password)
-    return await run_model_import(body.url, body.files)
+    return await run_model_import(body.url, body.files, destination_folder_id=body.folder_id,
+                                  create_subfolder=body.create_subfolder, title_override=body.title)
+
+
+@app.get("/api/folders")
+async def api_folders(x_importer_password: str | None = Header(default=None)) -> list[dict]:
+    check_password(x_importer_password)
+    response=await bambuddy_request("GET","/library/folders/")
+    if response.status_code>=400: raise HTTPException(response.status_code,"Could not list Bambuddy folders.")
+    rows=response.json(); flat=[]
+    def walk(items,depth=0):
+        for item in items if isinstance(items,list) else []:
+            if item.get("can_write",True) and not (item.get("is_external") and item.get("external_readonly")):
+                flat.append({"id":item["id"],"name":("　"*depth)+item["name"]})
+            walk(item.get("children",[]),depth+1)
+    walk(rows)
+    return flat
 
 
 @app.post("/api/extension/v1/import-direct")
@@ -1411,7 +1599,11 @@ async def api_import_direct(body: DirectImportRequest, x_importer_password: str 
     payload = await download_public_file(body.url)
     if filename.lower().endswith(".3mf") and not payload.startswith(b"PK\x03\x04"):
         raise HTTPException(400, "The downloaded .3mf was not a valid ZIP/3MF container.")
-    return await bambuddy_upload(filename, payload, body.url)
+    result=await bambuddy_upload(filename, payload, body.url)
+    save_history({"title":filename,"source":"Direct file URL","source_url":body.url,"imported_files":[result]})
+    result["file_manager_url"]=f"{BAMBUDDY_URL}/files?highlight={result.get('id')}"
+    result["slice_url"]=result["file_manager_url"]+"&slice=1"
+    return result
 
 
 HTML = r'''<!doctype html>
@@ -1447,15 +1639,19 @@ label{display:block;font-weight:600;font-size:14px;margin-bottom:7px}input{width
  <div id="modelPanel" class="panel hidden">
   <div class="tag" id="source"></div>
   <h2 id="modelTitle" style="font-size:19px;margin:7px 0"></h2>
+  <label for="titleOverride">Bambuddy title</label><input id="titleOverride" type="text" maxlength="255" placeholder="Keep model title">
+  <label for="destinationFolder" style="margin-top:12px">Save in folder</label><select id="destinationFolder"><option value="">Library root</option></select>
+  <label class="remember-option"><input id="createSubfolder" type="checkbox"> Create a subfolder named after the title</label>
   <div id="sourceTags" class="tag-list hidden"></div>
   <div class="file-actions">
    <div><button id="selectAll" class="secondary" type="button">Select all</button> <span id="selectionCount" class="selection-count">0 selected</span></div>
-   <button id="importSelected" type="button" disabled>Import selected files</button>
+   <div><button id="importSelected" type="button" disabled>Save</button> <button id="saveSlice" type="button" disabled>Save and slice</button></div>
   </div>
   <p class="hint">Selecting multiple files creates one subfolder in Bambuddy. Source tags are added to every imported file.</p>
   <div id="fileList"></div>
  </div>
  <div class="panel"><label for="directUrl">Direct model-file URL</label><div class="row"><input id="directUrl" type="url" placeholder="https://example.com/model.3mf"><button id="directImport" class="secondary">Import file</button></div><p class="hint">This must be a direct file-download URL, not a model's web page.</p><div id="directStatus" class="status"></div></div>
+ <div class="panel"><h2 style="font-size:18px">Download history</h2><div id="historyList" class="hint">No downloads in this browser yet.</div></div>
 </section>
 <p class="hint">After import, open Bambuddy → File Manager, select the new file, then use the OrcaSlicer sidecar to slice it.</p>
 </main>
@@ -1464,10 +1660,13 @@ let importerPassword='';let currentModel=null;
 const $=id=>document.getElementById(id);
 function showStatus(id,message,error=false){const el=$(id);el.textContent=message;el.classList.remove('hidden');el.style.display='block';el.classList.toggle('error',error)}
 async function api(path,body){const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-Importer-Password':importerPassword},body:JSON.stringify(body)});let data={};try{data=await response.json()}catch{}if(!response.ok)throw new Error(data.detail||('HTTP '+response.status));return data}
+async function loadFolders(){const r=await fetch('/api/folders',{headers:{'X-Importer-Password':importerPassword}});if(!r.ok)return;const rows=await r.json();const select=$('destinationFolder');select.replaceChildren(new Option('Library root',''));rows.forEach(f=>select.add(new Option(f.name,f.id)))}
 function selectedFiles(){return [...document.querySelectorAll('.file-check:checked')].map(box=>box._modelFile)}
-function updateSelection(){const count=selectedFiles().length;$('selectionCount').textContent=count+' selected';$('importSelected').disabled=count===0}
+function updateSelection(){const files=selectedFiles();const count=files.length;$('selectionCount').textContent=count+' selected';$('importSelected').disabled=count===0;const projectFiles=files.filter(f=>/\.(3mf|gcode)(\.3mf)?$/i.test(f.name||''));$('saveSlice').disabled=count!==1||projectFiles.length!==1}
+let sliceAfterSave=false;
+async function renderHistory(){const root=$('historyList');root.replaceChildren();try{const r=await fetch('/api/history',{headers:{'X-Importer-Password':importerPassword}});const rows=await r.json();if(!rows.length){root.textContent='No downloads yet.';return}rows.forEach(x=>{const row=document.createElement('p');const file=document.createElement('a');file.href=x.file_url;file.textContent=x.title+' — '+x.filename;file.target='_blank';const site=document.createElement('a');site.href=x.url;site.textContent='Website';site.target='_blank';const slice=document.createElement('a');slice.href=x.slice_url;slice.textContent='Slice';slice.target='_blank';row.append(file,document.createTextNode(' · '),slice,document.createTextNode(' · '),site);root.append(row)})}catch{root.textContent='History is unavailable.'}}
 const REMEMBERED_SESSION_KEY='bambuddy-importer-session-v1';
-function showImporter(){ $('loginPanel').classList.add('hidden');$('mainPanel').classList.remove('hidden') }
+function showImporter(){ $('loginPanel').classList.add('hidden');$('mainPanel').classList.remove('hidden');loadFolders();renderHistory() }
 function clearRememberedSession(){try{localStorage.removeItem(REMEMBERED_SESSION_KEY)}catch{}}
 async function restoreRememberedSession(){
  let savedToken='';
@@ -1514,9 +1713,10 @@ $('forgetLogin').onclick=()=>{
  $('loginPanel').classList.remove('hidden');
  showStatus('loginStatus','Saved login removed from this browser.',false);
 };
-restoreRememberedSession();
+saveSlice.onclick=()=>{sliceAfterSave=true;importSelected.click()}; resolve.addEventListener('click',()=>loadFolders()); restoreRememberedSession();
 $('selectAll').onclick=()=>{const boxes=[...document.querySelectorAll('.file-check')];const all=boxes.length>0&&boxes.every(box=>box.checked);boxes.forEach(box=>box.checked=!all);$('selectAll').textContent=all?'Select all':'Clear selection';updateSelection()};
 $('resolve').onclick=async()=>{const url=$('modelUrl').value.trim();if(!url)return showStatus('resolveStatus','Paste a model URL first.',true);$('resolve').disabled=true;$('modelPanel').classList.add('hidden');try{currentModel=await api('/api/resolve',{url:url});$('source').textContent=currentModel.source;$('modelTitle').textContent=currentModel.title;$('fileList').replaceChildren();$('sourceTags').replaceChildren();const sourceTags=currentModel.tags||[];if(sourceTags.length){const heading=document.createElement('strong');heading.textContent='Source tags:';$('sourceTags').append(heading);sourceTags.forEach(name=>{const chip=document.createElement('span');chip.className='tag-chip';chip.textContent=name;$('sourceTags').append(chip)});$('sourceTags').classList.remove('hidden')}else{$('sourceTags').classList.add('hidden')}for(const file of currentModel.files){const row=document.createElement('div');row.className='file';const checkbox=document.createElement('input');checkbox.type='checkbox';checkbox.className='file-check';checkbox._modelFile=file;checkbox.addEventListener('change',updateSelection);const info=document.createElement('div');info.className='file-info';const title=document.createElement('strong');title.textContent=file.name;const sub=document.createElement('small');const size=file.size?' • '+(Number(file.size)/1048576).toFixed(2)+' MB':'';sub.textContent=(file.kind||'file')+size+(file.note?' • '+file.note:'');info.append(title,sub);row.append(checkbox,info);$('fileList').append(row)}$('selectAll').textContent='Select all';updateSelection();$('modelPanel').classList.remove('hidden');showStatus('resolveStatus','Found '+currentModel.files.length+' supported file(s). Select the parts to import together.')}catch(e){showStatus('resolveStatus',e.message,true)}finally{$('resolve').disabled=false}};
-$('importSelected').onclick=async()=>{const selected=selectedFiles();if(!selected.length)return showStatus('resolveStatus','Select at least one file.',true);$('importSelected').disabled=true;$('importSelected').textContent='Importing…';try{const result=await api('/api/import-batch',{url:currentModel.url,files:selected.map(file=>({file_id:file.id,file_type:file.kind,filename:file.name}))});let message='Imported '+(result.files_imported||0)+' file(s) into Bambuddy.';if(result.folder)message+='\nFolder: '+result.folder.name;if(result.tags_assigned&&result.tags_assigned.length)message+='\nBambuddy tags: '+result.tags_assigned.join(', ');if(result.tag_warning)message+='\nTag warning: '+result.tag_warning;if(result.failed_files&&result.failed_files.length)message+='\nFailed: '+result.failed_files.map(item=>item.filename+': '+item.error).join('; ');showStatus('resolveStatus',message,result.files_imported===0);$('importSelected').textContent='Import selected files';updateSelection();const first=result.imported_files&&result.imported_files[0]&&result.imported_files[0].id;if(first)window.parent.postMessage({type:'bambuddy:navigate',path:'/files?highlight='+encodeURIComponent(first)},'*')}catch(e){showStatus('resolveStatus',e.message,true);$('importSelected').textContent='Retry import';updateSelection()}};
+$('importSelected').onclick=async()=>{const selected=selectedFiles();if(!selected.length)return showStatus('resolveStatus','Select at least one file.',true);$('importSelected').disabled=true;$('importSelected').textContent='Importing…';try{const result=await api('/api/import-batch',{url:currentModel.url,files:selected.map(file=>({file_id:file.id,file_type:file.kind,filename:file.name})),folder_id:destinationFolder.value?Number(destinationFolder.value):null,create_subfolder:createSubfolder.checked,title:titleOverride.value.trim()||null});let message='Imported '+(result.files_imported||0)+' file(s) into Bambuddy.';if(result.folder)message+='\nFolder: '+result.folder.name;if(result.tags_assigned&&result.tags_assigned.length)message+='\nBambuddy tags: '+result.tags_assigned.join(', ');if(result.tag_warning)message+='\nTag warning: '+result.tag_warning;if(result.failed_files&&result.failed_files.length)message+='\nFailed: '+result.failed_files.map(item=>item.filename+': '+item.error).join('; ');showStatus('resolveStatus',message,result.files_imported===0);$('importSelected').textContent='Import selected files';updateSelection();const first=result.imported_files&&result.imported_files[0]&&result.imported_files[0].id;if(first){const target=sliceAfterSave?result.slice_url:result.file_manager_url;if(window.parent===window){window.open(target,'_blank','noopener')}else{window.parent.postMessage({type:'bambuddy:navigate',path:'/files?highlight='+encodeURIComponent(first)+(sliceAfterSave?'&slice=1':'')},'*')}}sliceAfterSave=false}catch(e){showStatus('resolveStatus',e.message,true);$('importSelected').textContent='Retry import';updateSelection()}};
 $('directImport').onclick=async()=>{const url=$('directUrl').value.trim();if(!url)return showStatus('directStatus','Paste a direct HTTPS file URL first.',true);$('directImport').disabled=true;try{const result=await api('/api/import-direct',{url});showStatus('directStatus',`Imported ${result.filename||'file'} into Bambuddy. Open File Manager to slice it.`)}catch(e){showStatus('directStatus',e.message,true)}finally{$('directImport').disabled=false}};
 </script></body></html>'''
+
