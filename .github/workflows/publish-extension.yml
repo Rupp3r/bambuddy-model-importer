@@ -92,6 +92,7 @@ jobs:
           mkdir -p package/bambuddy-model-importer
           cp -R extension/. package/bambuddy-model-importer/
           (cd package && zip -qr "../$asset" bambuddy-model-importer)
+          unzip -Z1 "$asset" | grep -q '^bambuddy-model-importer/manifest.json$'
           echo "asset=$asset" >> "$GITHUB_OUTPUT"
 
       - name: Check that the extension version has not already been released

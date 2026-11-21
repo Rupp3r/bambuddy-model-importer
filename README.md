@@ -26,7 +26,9 @@ The importer runs as a separate service. It does not replace or modify Bambuddy.
 - Password-protected web interface.
 - Configurable maximum download size.
 - Choose a Bambuddy File Manager folder, optionally create a title-named subfolder, and override the imported title.
-- Keep a persistent local import history with links to Bambuddy files and their source pages.
+- Set each imported file's External link to the original model page and add a `Source: <URL>` tag when that label fits Bambuddy's 64-character tag-name limit. The External link always retains the full URL.
+- Keep a persistent, thumbnail-backed import history with File, Slice and Website actions. File and Website open in the same tab. Slice opens the configured desktop slicer or queues slicing through the configured Bambuddy sidecar.
+- Save and slice one unsliced STL or 3MF. Multi-file selections and G-code files are save-only.
 - Resolve MakerWorld plates through Bambuddy's native Model Sources API. This requires the configured API key to have MakerWorld/cloud permissions available to its owner.
 
 ### Supported file formats
@@ -39,7 +41,6 @@ STL, 3MF, G-code, STEP, STP, OBJ and AMF.
 |---|---|---|
 | [Printables](https://www.printables.com/) | Public/free model page | Public/free model files. Paid, Club-only or otherwise restricted files may not be downloadable anonymously. |
 | [Shapekit](https://shapekit.cc/3d-models) | Public model page, e.g. `https://shapekit.cc/bird-feeder` | Public STL/3MF and ZIP downloads exposed by the page. ZIP imports are expanded into supported model files. |
-| [MakerWorld](https://makerworld.com/) | Public `/models/{id}` URL | Plate downloads use Bambuddy's built-in MakerWorld resolve/import endpoints and stored Bambu Cloud credentials. |
 | [NASA 3D Resources](https://science.nasa.gov/3d-resources/) | Folder or file page in the [official NASA 3D Resources GitHub repository](https://github.com/nasa/NASA-3D-Resources) | Supported printable files found in that repository folder. The GitHub API is used without a personal token. |
 | [NIH 3D](https://3d.nih.gov/) | Public entry page, e.g. `https://3d.nih.gov/entries/3DPX-000914` | Published submission files in supported formats. Uses the public entry and download endpoints; no API key or NIH account is needed. Each model has its own licence. |
 | [Smithsonian 3D](https://3d.si.edu/) | Public 3D object page | Public print-ready STL files exposed by the Smithsonian 3D API. Some objects do not have an STL download. Check the individual object's usage conditions before reuse. |
@@ -59,15 +60,21 @@ Printables' GraphQL API and several other sites' undocumented/public endpoints c
 
 Sites where the model page is public but the actual download requires a login, personal access token or membership are not described as account-free sources and are not enabled as such.
 
+### Bambuddy-connected source
+
+| Source | Requirement |
+|---|---|
+| [MakerWorld](https://makerworld.com/) public `/models/{id}` pages | The importer uses Bambuddy's built-in Model Sources resolve/import API. The Bambuddy API key needs **Read Status**, **Manage Library** and **Allow cloud access**; the key owner also needs an active Bambu Cloud login stored in Bambuddy. No MakerWorld credentials are entered into the importer. |
+
 ## Browser extension
 
 A Chrome/Chromium Manifest V3 extension is available from the [GitHub Releases](https://github.com/Rupp3r/bambuddy-model-importer/releases/latest) page.
 
-It adds a toolbar shortcut to import models from the same sources supported by this importer: Printables, NASA 3D Resources, NIH 3D, Smithsonian 3D, Wikimedia Commons, Internet Archive Thingiverse snapshots, optional live Thingiverse API, and direct HTTPS model-file links. The extension reads the current tab URL, asks the importer to resolve the model, lets you select files, then asks the importer to download and upload them. Multiple selections use the importer's existing folder and source-tag handling.
+It adds a toolbar shortcut to import models from the same sources supported by this importer: Printables, Shapekit, MakerWorld through Bambuddy, NASA 3D Resources, NIH 3D, Smithsonian 3D, Wikimedia Commons, Internet Archive Thingiverse snapshots, optional live Thingiverse API, and direct HTTPS model-file links. The extension reads the current tab URL, asks the importer to resolve the model, lets you select files, then asks the importer to download and upload them. Multiple selections use the importer's existing folder and source-tag handling.
 
 ### Extension setup
 
-1. Download the latest extension ZIP from [Releases](https://github.com/Rupp3r/bambuddy-model-importer/releases/latest) and extract it.
+1. Download the latest extension ZIP from [Releases](https://github.com/Rupp3r/bambuddy-model-importer/releases/latest) and extract it. The ZIP contains a `bambuddy-model-importer/` folder; extract updates into the same parent folder and allow the files to be overwritten.
 2. Open `chrome://extensions/` in Chrome or the equivalent extensions page in a Chromium browser.
 3. Enable **Developer mode**, select **Load unpacked**, and choose the extracted extension folder.
 4. Open extension **Settings**. Enter the base URL of the importer service and its `IMPORTER_PASSWORD`.
@@ -91,11 +98,12 @@ The extension requires CORS access from browser-extension origins on the importe
 3. Paste a supported model-page URL or a direct HTTPS file URL.
 4. Select one or more supported files from the model page.
 5. When multiple files are selected, the importer creates a Bambuddy subfolder named after the model and uploads the selected parts into it. Single-file imports stay in the library root. A single Smithsonian or Internet Archive ZIP that expands into several mesh files also gets a subfolder.
-6. When the source provides tags or categories, the importer displays them before import, reuses matching Bambuddy tags or creates missing tags, then assigns those tags to the imported files. Sources that do not expose tags are imported without source tags.
-7. The importer downloads the selected files server-side and uploads them to Bambuddy's library API.
-8. Open the imported files in Bambuddy and use the slicer configured in that installation.
+6. When the source provides tags or categories, the importer displays them before import, reuses matching Bambuddy tags or creates missing tags, then assigns those tags to the imported files. It also sets the file's External link to the model page and adds a Source URL tag where Bambuddy's tag-name limit allows it.
+7. The importer downloads the selected files server-side and uploads them to Bambuddy's library API. You can choose a destination folder, create a title-named subfolder, and override the title.
+8. Choose **Save** or **Save and slice** for one STL or unsliced 3MF. Multi-file selections and G-code are save-only. The Slice action follows Bambuddy's configured desktop slicer or queues the configured API sidecar.
+9. Use the import history cards to open the saved file in File Manager, start slicing, or revisit the source website. File and Website links stay in the current tab.
 
-Importing a model does not automatically slice or start a print. Slicing and printer control remain within Bambuddy and any separately configured services.
+Slicing uses Bambuddy's configured slicer. The importer does not start a print.
 
 ## Deploy with Portainer
 
@@ -115,7 +123,7 @@ The repository includes a generic `compose.yaml` for a Portainer Git Repository 
 | Variable | Description |
 |---|---|
 | `BAMBUDDY_URL` | Base URL of the Bambuddy API, reachable from the importer container. |
-| `BAMBUDDY_API_KEY` | Bambuddy API key with **Manage Library** permission. This scope is used for uploads, folder creation and tag creation/assignment. |
+| `BAMBUDDY_API_KEY` | Bambuddy API key with **Read Status** and **Manage Library** permissions. For MakerWorld imports, also enable **Allow cloud access** and make sure the key owner has an active Bambu Cloud login in Bambuddy. |
 | `IMPORTER_PASSWORD` | Long, unique password used to unlock the importer interface. |
 
 ### Optional environment variables
@@ -132,6 +140,8 @@ The repository includes a generic `compose.yaml` for a Portainer Git Repository 
 The stack uses its own default Compose network and does not hard-code an existing network name. Set `BAMBUDDY_URL` to an address reachable from the importer container.
 
 The Compose file includes a `host.docker.internal:host-gateway` mapping for Docker environments that support it. This can be used when Bambuddy's API is exposed on the Docker host. If Bambuddy runs in another container, connect the importer to a network that both containers can access, then use Bambuddy's service or container DNS name and API port in `BAMBUDDY_URL`. Configure any external network for your environment in Portainer.
+
+The Compose file mounts the named `importer-history` volume at `/data`. Keep this volume when updating or recreating the container; deleting it removes the importer's saved history. Older browser-only history is not automatically migrated into the persistent history database.
 
 Open the web interface at `http://<docker-host>:<IMPORTER_PORT>` (default: `http://<docker-host>:8097`).
 
@@ -168,7 +178,7 @@ docker compose up -d
 
 - Restrict access to trusted users and networks, such as a private LAN or VPN.
 - Do not expose the importer directly to the public internet without an appropriate secure access layer.
-- Use a dedicated Bambuddy API key with the **Manage Library** scope needed for file uploads, folder creation and tag assignment.
+- Use a dedicated Bambuddy API key with **Read Status** and **Manage Library**. MakerWorld imports additionally require **Allow cloud access**, and the key owner must have an active Bambu Cloud login stored in Bambuddy.
 - The optional **Remember this browser** setting stores a signed importer session token in that browser's local storage for up to one year. The importer password itself and the Bambuddy API key are not stored in the browser. Anyone with access to that browser profile can use the remembered importer session. Use **Forget saved login** on shared devices. Changing `IMPORTER_PASSWORD` invalidates existing remembered sessions.
 - Do not commit `.env` files, API keys, access tokens or passwords.
 - The importer only accepts public HTTPS download URLs and rejects destinations that resolve to non-public IP addresses.
@@ -195,4 +205,3 @@ python -m unittest discover -s tests -v
 ```
 
 The health endpoint is available at `/health`.
-

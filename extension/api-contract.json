@@ -1,7 +1,7 @@
 {
   "api_name": "Bambuddy Model Importer Extension API",
   "api_major": 1,
-  "contract_revision": 2,
+  "contract_revision": 3,
   "supported_api_majors": [
     1
   ],
@@ -33,6 +33,23 @@
         "printables.com"
       ],
       "account_required": false
+    },
+    {
+      "id": "shapekit",
+      "name": "Shapekit",
+      "hosts": [
+        "shapekit.cc"
+      ],
+      "account_required": false
+    },
+    {
+      "id": "makerworld",
+      "name": "MakerWorld through Bambuddy",
+      "hosts": [
+        "makerworld.com"
+      ],
+      "account_required": true,
+      "requirement": "Bambuddy API key with Allow cloud access and an active Bambu Cloud login stored in Bambuddy"
     },
     {
       "id": "nasa",

@@ -374,6 +374,135 @@ def normalize_source_tags(*values) -> list[str]:
     return found[:40]
 
 
+def source_url_tags(url: str) -> list[str]:
+    """Represent the source page in Bambuddy's 64-character tag catalog."""
+    url = str(url or "").strip()
+    if not url:
+        return []
+    labeled = f"Source: {url}"
+    if len(labeled) <= 64:
+        return [labeled]
+    if len(url) <= 64:
+        return ["Source", url]
+    # Bambuddy tags cannot hold an arbitrary-length URL. Keep the generic tag;
+    # the complete URL is stored in the file's External link field.
+    return ["Source"]
+
+
+def is_sliceable_filename(filename: str) -> bool:
+    lower = str(filename or "").lower()
+    if lower.endswith((".gcode", ".gcode.3mf")):
+        return False
+    return lower.endswith((".stl", ".3mf"))
+
+
+def first_slicer_preset_refs(presets: dict) -> dict[str, dict[str, str]]:
+    """Use Bambuddy's preset-list order for a default sidecar slice."""
+    picked: dict[str, dict[str, str]] = {}
+    for slot in ("printer", "process", "filament"):
+        for tier in ("local", "orca_cloud", "cloud", "standard"):
+            values = (presets.get(tier) or {}).get(slot) or []
+            for item in values:
+                if not isinstance(item, dict) or item.get("id") is None:
+                    continue
+                source = str(item.get("source") or tier)
+                picked[slot] = {"source": source, "id": str(item["id"])}
+                break
+            if slot in picked:
+                break
+    return picked
+
+
+def desktop_slicer_url(file_id: int, token: str, filename: str, slicer: str, user_agent: str = "") -> str:
+    download_url = (
+        f"{BAMBUDDY_URL.rstrip('/')}/api/v1/library/files/{int(file_id)}/dl/"
+        f"{quote(str(token), safe='')}/{quote(str(filename), safe='')}"
+    )
+    encoded = quote(download_url, safe="")
+    if str(slicer).lower() == "orcaslicer":
+        return f"orcaslicer://open?file={encoded}"
+    if "mac" in str(user_agent).lower():
+        return f"bambustudioopen://{encoded}"
+    return f"bambustudio://open?file={encoded}"
+
+
+def _response_detail(response: httpx.Response) -> str:
+    try:
+        payload = response.json()
+        return str(payload.get("detail", response.text)) if isinstance(payload, dict) else response.text
+    except ValueError:
+        return response.text
+
+
+async def prepare_slicer_action(file_id: int, user_agent: str = "") -> dict:
+    """Hand off to Bambuddy's configured desktop slicer or queue its sidecar."""
+    settings_response = await bambuddy_request("GET", "/settings/ui-flags")
+    if settings_response.status_code >= 400:
+        raise HTTPException(
+            settings_response.status_code,
+            f"Could not read Bambuddy's slicer settings: {_response_detail(settings_response)}",
+        )
+    settings = settings_response.json()
+
+    file_response = await bambuddy_request("GET", f"/library/files/{int(file_id)}")
+    if file_response.status_code >= 400:
+        raise HTTPException(file_response.status_code, f"Could not load the Bambuddy file: {_response_detail(file_response)}")
+    file_info = file_response.json()
+    filename = str(file_info.get("filename") or "")
+    if not is_sliceable_filename(filename):
+        raise HTTPException(400, "Only unsliced STL and 3MF model files can be sliced.")
+
+    if settings.get("use_slicer_api") is True:
+        presets_response = await bambuddy_request("GET", "/slicer/presets")
+        if presets_response.status_code >= 400:
+            raise HTTPException(presets_response.status_code, f"Could not read Bambuddy slicer presets: {_response_detail(presets_response)}")
+        preset_refs = first_slicer_preset_refs(presets_response.json())
+        missing = [slot for slot in ("printer", "process", "filament") if slot not in preset_refs]
+        if missing:
+            raise HTTPException(400, "Bambuddy has no default " + ", ".join(missing) + " slicer preset(s).")
+        filament = preset_refs["filament"]
+        slice_response = await bambuddy_request(
+            "POST",
+            f"/library/files/{int(file_id)}/slice",
+            json={
+                "printer_preset": preset_refs["printer"],
+                "process_preset": preset_refs["process"],
+                "filament_preset": filament,
+                "filament_presets": [filament],
+            },
+        )
+        if slice_response.status_code >= 400:
+            raise HTTPException(slice_response.status_code, f"Bambuddy could not queue slicing: {_response_detail(slice_response)}")
+        job = slice_response.json()
+        return {
+            "mode": "sidecar",
+            "slicer": str(settings.get("preferred_slicer") or "bambu_studio"),
+            "job_id": job.get("job_id"),
+            "status": job.get("status"),
+        }
+
+    slicer = settings.get("open_in_slicer") or settings.get("preferred_slicer") or "bambu_studio"
+    token_response = await bambuddy_request("POST", f"/library/files/{int(file_id)}/slicer-token")
+    if token_response.status_code >= 400:
+        raise HTTPException(token_response.status_code, f"Could not prepare the slicer download: {_response_detail(token_response)}")
+    token = token_response.json().get("token")
+    if not token:
+        raise HTTPException(502, "Bambuddy did not return a slicer download token.")
+    return {
+        "mode": "desktop",
+        "slicer": str(slicer),
+        "slicer_url": desktop_slicer_url(file_id, token, filename, str(slicer), user_agent),
+    }
+
+
+def history_contains_file(file_id: int) -> bool:
+    try:
+        with sqlite3.connect(HISTORY_DB) as db:
+            return db.execute("SELECT 1 FROM imports WHERE file_id=? LIMIT 1", (str(file_id),)).fetchone() is not None
+    except (OSError, sqlite3.Error):
+        return False
+
+
 def safe_folder_name(value: str) -> str:
     """Turn a source model title into one safe Bambuddy folder name."""
     invalid = '<>:"/\\|?*'
@@ -546,11 +675,13 @@ async def bambuddy_upload(filename: str, payload: bytes, source_url: str, folder
     file_id = result.get("id")
     if file_id is not None and source_url.startswith(("http://", "https://")):
         try:
-            await bambuddy_request("PUT", f"/library/files/{int(file_id)}", json={"external_url": source_url})
-        except HTTPException:
+            updated = await bambuddy_request("PUT", f"/library/files/{int(file_id)}", json={"external_url": source_url})
+            if updated.status_code >= 400:
+                result["external_link_warning"] = _response_detail(updated)
+        except HTTPException as exc:
             # Keep a successful file import successful if a Bambuddy API key
             # lacks file-metadata update permission.
-            pass
+            result["external_link_warning"] = str(exc.detail)
     return result
 
 async def printables_graphql(query: str, variables: dict) -> dict:
@@ -1367,10 +1498,15 @@ async def import_resolved_file(url: str, selected: dict, folder_id: int | None) 
             try: detail=response.json().get("detail",response.text)
             except Exception: detail=response.text
             raise HTTPException(response.status_code,f"Bambuddy MakerWorld import failed: {detail}")
-        data=response.json(); library_id=data.get("library_file_id")
+        data=response.json(); library_id=data.get("library_file_id"); link_warning=None
         if library_id and filename:
-            await bambuddy_request("PUT",f"/library/files/{int(library_id)}",json={"filename":filename,"external_url":url})
-        return {"id":library_id,"filename":filename,"source_url":url,"folder_id":data.get("folder_id")}
+            try:
+                updated = await bambuddy_request("PUT",f"/library/files/{int(library_id)}",json={"filename":filename,"external_url":url})
+                if updated.status_code >= 400: link_warning=_response_detail(updated)
+            except HTTPException as exc: link_warning=str(exc.detail)
+        result={"id":library_id,"filename":filename,"source_url":url,"folder_id":data.get("folder_id")}
+        if link_warning: result["external_link_warning"]=link_warning
+        return result
     if parse_thingiverse_id(url):
         return await import_thingiverse(url, file_id, filename, folder_id=folder_id)
     if parse_nasa_github_folder(url):
@@ -1486,9 +1622,10 @@ async def run_model_import(url: str, selections: list[ImportSelection], *, desti
     file_ids = uploaded_file_ids(imported_results)
     tags_assigned = []
     tag_warning = None
-    if file_ids and resolved.get("tags"):
+    import_tags = normalize_source_tags(source_url_tags(url), resolved.get("tags"))
+    if file_ids and import_tags:
         try:
-            tags_assigned = await apply_bambuddy_tags(file_ids, resolved.get("tags") or [])
+            tags_assigned = await apply_bambuddy_tags(file_ids, import_tags)
         except HTTPException as exc:
             tag_warning = str(exc.detail)
 
@@ -1503,9 +1640,12 @@ async def run_model_import(url: str, selections: list[ImportSelection], *, desti
         "tags_assigned": tags_assigned,
         "tag_warning": tag_warning,
     }
+    link_warning = next((item.get("external_link_warning") for item in flattened_files
+                         if item.get("external_link_warning")), None)
+    if link_warning:
+        result["external_link_warning"] = link_warning
     first_id=next((item.get("id") for item in flattened_files if item.get("id") is not None),None)
     result["file_manager_url"]=f"{BAMBUDDY_URL}/files?highlight={first_id}" if first_id is not None else None
-    result["slice_url"]=(result["file_manager_url"]+"&slice=1") if result["file_manager_url"] else None
     save_history(result)
     return result
 
@@ -1531,9 +1671,21 @@ async def api_history(x_importer_password: str | None = Header(default=None)) ->
     rows=read_history()
     for row in rows:
         row["file_url"]=f"{BAMBUDDY_URL}/files?highlight={row['file_id']}"
-        row["slice_url"]=row["file_url"]+"&slice=1"
+        row["can_slice"]=is_sliceable_filename(row.get("filename", ""))
         row["thumbnail_url"]=f"/api/history/{row['file_id']}/thumbnail?token={create_session_token()}"
     return rows
+
+
+@app.post("/api/history/{file_id}/slice")
+async def api_history_slice(
+    file_id: int,
+    user_agent: str | None = Header(default=None, alias="User-Agent"),
+    x_importer_password: str | None = Header(default=None),
+) -> dict:
+    check_password(x_importer_password)
+    if not history_contains_file(file_id):
+        raise HTTPException(404, "This file is not in the importer's download history.")
+    return await prepare_slicer_action(file_id, user_agent or "")
 
 
 @app.get("/api/history/{file_id}/thumbnail")
@@ -1583,10 +1735,26 @@ async def api_import(body: ImportRequest, x_importer_password: str | None = Head
 
 @app.post("/api/extension/v1/import-batch")
 @app.post("/api/import-batch")
-async def api_import_batch(body: BatchImportRequest, x_importer_password: str | None = Header(default=None)) -> dict:
+async def api_import_batch(
+    body: BatchImportRequest,
+    user_agent: str | None = Header(default=None, alias="User-Agent"),
+    x_importer_password: str | None = Header(default=None),
+) -> dict:
     check_password(x_importer_password)
-    return await run_model_import(body.url, body.files, destination_folder_id=body.folder_id,
-                                  create_subfolder=body.create_subfolder, title_override=body.title)
+    if body.save_and_slice and (len(body.files) != 1 or not is_sliceable_filename(body.files[0].filename)):
+        raise HTTPException(400, "Save and slice requires one unsliced STL or 3MF file. Save multiple files or G-code without slicing.")
+    result = await run_model_import(body.url, body.files, destination_folder_id=body.folder_id,
+                                    create_subfolder=body.create_subfolder, title_override=body.title)
+    if body.save_and_slice:
+        file_ids = uploaded_file_ids(result.get("imported_files") or [])
+        if len(file_ids) != 1:
+            result["slice_error"] = "This download produced multiple files. Save them, then slice one STL or 3MF from history."
+        else:
+            try:
+                result["slice_action"] = await prepare_slicer_action(file_ids[0], user_agent or "")
+            except HTTPException as exc:
+                result["slice_error"] = str(exc.detail)
+    return result
 
 
 @app.get("/api/folders")
@@ -1615,8 +1783,13 @@ async def api_import_direct(body: DirectImportRequest, x_importer_password: str 
         raise HTTPException(400, "The downloaded .3mf was not a valid ZIP/3MF container.")
     result=await bambuddy_upload(filename, payload, body.url)
     save_history({"title":filename,"source":"Direct file URL","source_url":body.url,"imported_files":[result]})
+    try:
+        result["tags_assigned"] = await apply_bambuddy_tags([int(result["id"])], source_url_tags(body.url))
+        result["tag_warning"] = None
+    except HTTPException as exc:
+        result["tags_assigned"] = []
+        result["tag_warning"] = str(exc.detail)
     result["file_manager_url"]=f"{BAMBUDDY_URL}/files?highlight={result.get('id')}"
-    result["slice_url"]=result["file_manager_url"]+"&slice=1"
     return result
 
 
@@ -1636,7 +1809,7 @@ label{display:block;font-weight:600;font-size:14px;margin-bottom:7px}input{width
 .login-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:0 2px;margin:0 0 12px}.login-toolbar button{padding:8px 11px;font-size:13px}
 .file{display:flex;align-items:center;justify-content:flex-start;gap:12px;border-top:1px solid var(--line);padding:13px 0}.file:first-child{border-top:0}.file input[type=checkbox]{width:21px;height:21px;flex:0 0 auto;margin:0;accent-color:var(--accent)}.file-info{flex:1;min-width:0}.file small{display:block;color:var(--muted);margin-top:3px;overflow-wrap:anywhere}
 .file-actions{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:14px 0}.selection-count{color:var(--muted);font-size:13px;margin-left:10px}.tag-list{display:flex;gap:7px;flex-wrap:wrap;margin:12px 0}.tag-chip{font-size:12px;padding:4px 9px;border:1px solid #4b5563;background:#111827;border-radius:999px;color:#d1d5db}
-.history-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}.history-card{overflow:hidden;border:1px solid var(--line);border-radius:12px;background:#111827}.history-card img{width:100%;height:150px;object-fit:cover;background:#1f2937}.history-card-body{padding:12px}.history-card a{color:#86efac}.history-actions{display:flex;gap:8px;margin-top:10px}.history-actions a{padding:7px 9px;border-radius:7px;background:#374151;text-decoration:none;font-size:13px}
+.history-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}.history-card{overflow:hidden;border:1px solid var(--line);border-radius:12px;background:#111827}.history-card img{width:100%;height:150px;object-fit:cover;background:#1f2937}.history-card-body{padding:12px}.history-card a{color:#86efac}.history-actions{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}.history-actions a,.history-actions button{padding:7px 9px;border-radius:7px;background:#374151;text-decoration:none;font-size:13px;color:var(--text);border:1px solid #4b5563}.history-actions button:disabled{opacity:.45;cursor:not-allowed}.history-feedback{display:block;color:var(--muted);font-size:12px;margin-top:8px;white-space:pre-wrap}
 .status{white-space:pre-wrap;padding:12px;border-radius:9px;background:#111827;color:#d1d5db;margin-top:12px;display:none}.status.error{color:#fecaca;border:1px solid #7f1d1d}.hint{font-size:13px}.hidden{display:none!important}.tag{color:#86efac;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.06em}
 @media(max-width:560px){.row{flex-direction:column}.row button{width:100%}.file-actions{align-items:stretch;flex-direction:column}.file-actions button{width:100%}.selection-count{margin-left:0}.file{align-items:flex-start}}
 </style></head><body><main>
@@ -1677,9 +1850,34 @@ function showStatus(id,message,error=false){const el=$(id);el.textContent=messag
 async function api(path,body){const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-Importer-Password':importerPassword},body:JSON.stringify(body)});let data={};try{data=await response.json()}catch{}if(!response.ok)throw new Error(data.detail||('HTTP '+response.status));return data}
 async function loadFolders(){const r=await fetch('/api/folders',{headers:{'X-Importer-Password':importerPassword}});if(!r.ok)return;const rows=await r.json();const select=$('destinationFolder');select.replaceChildren(new Option('Library root',''));rows.forEach(f=>select.add(new Option(f.name,f.id)))}
 function selectedFiles(){return [...document.querySelectorAll('.file-check:checked')].map(box=>box._modelFile)}
-function updateSelection(){const files=selectedFiles();const count=files.length;$('selectionCount').textContent=count+' selected';$('importSelected').disabled=count===0;const projectFiles=files.filter(f=>/\.(3mf|gcode)(\.3mf)?$/i.test(f.name||''));$('saveSlice').disabled=count!==1||projectFiles.length!==1}
+function updateSelection(){const files=selectedFiles();const count=files.length;$('selectionCount').textContent=count+' selected';$('importSelected').disabled=count===0;const name=files[0]&&files[0].name||'';const sliceable=count===1&&/\.(stl|3mf)$/i.test(name)&&!/\.gcode\.3mf$/i.test(name);$('saveSlice').disabled=!sliceable}
 let sliceAfterSave=false;
-async function renderHistory(){const root=$('historyList');root.replaceChildren();try{const r=await fetch('/api/history',{headers:{'X-Importer-Password':importerPassword}});const rows=await r.json();if(!rows.length){root.textContent='No downloads yet.';return}rows.forEach(x=>{const card=document.createElement('article');card.className='history-card';const img=document.createElement('img');img.src=x.thumbnail_url;img.alt=x.title;img.loading='lazy';img.onerror=()=>{img.style.display='none'};const body=document.createElement('div');body.className='history-card-body';const title=document.createElement('strong');title.textContent=x.title||x.filename;const file=document.createElement('div');const fileLink=document.createElement('a');fileLink.href=x.file_url;fileLink.textContent=x.filename;fileLink.target='_blank';file.append(fileLink);const actions=document.createElement('div');actions.className='history-actions';[[x.file_url,'▤ File'],[x.slice_url,'▶ Slice'],[x.url,'↗ Website']].forEach(([href,label])=>{const a=document.createElement('a');a.href=href;a.textContent=label;a.target='_blank';actions.append(a)});body.append(title,file,actions);card.append(img,body);root.append(card)})}catch{root.textContent='History is unavailable.'}}
+function openSlicerProtocol(url){const link=document.createElement('a');link.href=url;link.style.display='none';document.body.appendChild(link);link.click();link.remove()}
+async function sliceHistoryFile(fileId,filename,feedback,button){button.disabled=true;feedback.textContent='Preparing Bambuddy slicer…';try{const action=await api('/api/history/'+encodeURIComponent(fileId)+'/slice',{});if(action.mode==='desktop'){openSlicerProtocol(action.slicer_url);feedback.textContent='Opening '+action.slicer+' on this device.';const fallback=document.createElement('a');fallback.href=action.slicer_url;fallback.textContent='If it did not open, click to launch '+action.slicer;feedback.append(document.createElement('br'),fallback)}else{feedback.textContent='Slice job '+(action.job_id||'queued')+' queued in Bambuddy’s '+action.slicer+' sidecar.'}}catch(e){feedback.textContent='Could not start slicing: '+e.message}finally{button.disabled=false}}
+
+async function renderHistory(){
+ const root=$('historyList');root.replaceChildren();
+ try{
+  const r=await fetch('/api/history',{headers:{'X-Importer-Password':importerPassword}});
+  if(!r.ok)throw new Error('HTTP '+r.status);
+  const rows=await r.json();
+  if(!rows.length){root.textContent='No downloads yet.';return}
+  rows.forEach(x=>{
+   const card=document.createElement('article');card.className='history-card';
+   const img=document.createElement('img');img.src=x.thumbnail_url;img.alt=x.title;img.loading='lazy';img.onerror=()=>{img.style.display='none'};
+   const body=document.createElement('div');body.className='history-card-body';
+   const title=document.createElement('strong');title.textContent=x.title||x.filename;
+   const file=document.createElement('div');const fileLink=document.createElement('a');fileLink.href=x.file_url;fileLink.textContent=x.filename;file.append(fileLink);
+   const actions=document.createElement('div');actions.className='history-actions';
+   const fileAction=document.createElement('a');fileAction.href=x.file_url;fileAction.textContent='▤ File';actions.append(fileAction);
+   const slice=document.createElement('button');slice.type='button';slice.textContent='▶ Slice';slice.disabled=!x.can_slice;slice.title=x.can_slice?'Use Bambuddy’s configured slicer':'Only unsliced STL and 3MF files can be sliced';
+   const feedback=document.createElement('small');feedback.className='history-feedback';
+   slice.onclick=()=>sliceHistoryFile(x.file_id,x.filename,feedback,slice);actions.append(slice);
+   if(x.url){const site=document.createElement('a');site.href=x.url;site.textContent='↗ Website';actions.append(site)}
+   body.append(title,file,actions,feedback);card.append(img,body);root.append(card);
+  });
+ }catch{root.textContent='History is unavailable.'}
+}
 const REMEMBERED_SESSION_KEY='bambuddy-importer-session-v1';
 function showImporter(){ $('loginPanel').classList.add('hidden');$('mainPanel').classList.remove('hidden');loadFolders();renderHistory() }
 function clearRememberedSession(){try{localStorage.removeItem(REMEMBERED_SESSION_KEY)}catch{}}
@@ -1731,7 +1929,26 @@ $('forgetLogin').onclick=()=>{
 saveSlice.onclick=()=>{sliceAfterSave=true;importSelected.click()}; resolve.addEventListener('click',()=>loadFolders()); restoreRememberedSession();
 $('selectAll').onclick=()=>{const boxes=[...document.querySelectorAll('.file-check')];const all=boxes.length>0&&boxes.every(box=>box.checked);boxes.forEach(box=>box.checked=!all);$('selectAll').textContent=all?'Select all':'Clear selection';updateSelection()};
 $('resolve').onclick=async()=>{const url=$('modelUrl').value.trim();if(!url)return showStatus('resolveStatus','Paste a model URL first.',true);$('resolve').disabled=true;$('modelPanel').classList.add('hidden');try{currentModel=await api('/api/resolve',{url:url});$('source').textContent=currentModel.source;$('modelTitle').textContent=currentModel.title;$('fileList').replaceChildren();$('sourceTags').replaceChildren();const sourceTags=currentModel.tags||[];if(sourceTags.length){const heading=document.createElement('strong');heading.textContent='Source tags:';$('sourceTags').append(heading);sourceTags.forEach(name=>{const chip=document.createElement('span');chip.className='tag-chip';chip.textContent=name;$('sourceTags').append(chip)});$('sourceTags').classList.remove('hidden')}else{$('sourceTags').classList.add('hidden')}for(const file of currentModel.files){const row=document.createElement('div');row.className='file';const checkbox=document.createElement('input');checkbox.type='checkbox';checkbox.className='file-check';checkbox._modelFile=file;checkbox.addEventListener('change',updateSelection);const info=document.createElement('div');info.className='file-info';const title=document.createElement('strong');title.textContent=file.name;const sub=document.createElement('small');const size=file.size?' • '+(Number(file.size)/1048576).toFixed(2)+' MB':'';sub.textContent=(file.kind||'file')+size+(file.note?' • '+file.note:'');info.append(title,sub);row.append(checkbox,info);$('fileList').append(row)}$('selectAll').textContent='Select all';updateSelection();$('modelPanel').classList.remove('hidden');showStatus('resolveStatus','Found '+currentModel.files.length+' supported file(s). Select the parts to import together.')}catch(e){showStatus('resolveStatus',e.message,true)}finally{$('resolve').disabled=false}};
-$('importSelected').onclick=async()=>{const selected=selectedFiles();if(!selected.length)return showStatus('resolveStatus','Select at least one file.',true);$('importSelected').disabled=true;$('importSelected').textContent='Importing…';try{const result=await api('/api/import-batch',{url:currentModel.url,files:selected.map(file=>({file_id:file.id,file_type:file.kind,filename:file.name})),folder_id:destinationFolder.value?Number(destinationFolder.value):null,create_subfolder:createSubfolder.checked,title:titleOverride.value.trim()||null});let message='Imported '+(result.files_imported||0)+' file(s) into Bambuddy.';if(result.folder)message+='\nFolder: '+result.folder.name;if(result.tags_assigned&&result.tags_assigned.length)message+='\nBambuddy tags: '+result.tags_assigned.join(', ');if(result.tag_warning)message+='\nTag warning: '+result.tag_warning;if(result.failed_files&&result.failed_files.length)message+='\nFailed: '+result.failed_files.map(item=>item.filename+': '+item.error).join('; ');showStatus('resolveStatus',message,result.files_imported===0);$('importSelected').textContent='Import selected files';updateSelection();const first=result.imported_files&&result.imported_files[0]&&result.imported_files[0].id;if(first){const link=document.createElement('a');link.href=sliceAfterSave?result.slice_url:result.file_manager_url;link.target='_blank';link.textContent=sliceAfterSave?'Open saved file to slice':'Open saved file in File Manager';link.style.display='inline-block';link.style.marginTop='8px';$('resolveStatus').append(document.createElement('br'),link)}sliceAfterSave=false;renderHistory()}catch(e){showStatus('resolveStatus',e.message,true);$('importSelected').textContent='Retry import';updateSelection()}};
-$('directImport').onclick=async()=>{const url=$('directUrl').value.trim();if(!url)return showStatus('directStatus','Paste a direct HTTPS file URL first.',true);$('directImport').disabled=true;try{const result=await api('/api/import-direct',{url});showStatus('directStatus',`Imported ${result.filename||'file'} into Bambuddy. Open File Manager to slice it.`)}catch(e){showStatus('directStatus',e.message,true)}finally{$('directImport').disabled=false}};
+$('importSelected').onclick=async()=>{
+ const selected=selectedFiles();if(!selected.length)return showStatus('resolveStatus','Select at least one file.',true);
+ const saveAndSlice=sliceAfterSave;sliceAfterSave=false;$('importSelected').disabled=true;$('importSelected').textContent='Saving…';
+ try{
+  const result=await api('/api/import-batch',{url:currentModel.url,files:selected.map(file=>({file_id:file.id,file_type:file.kind,filename:file.name})),folder_id:destinationFolder.value?Number(destinationFolder.value):null,create_subfolder:createSubfolder.checked,title:titleOverride.value.trim()||null,save_and_slice:saveAndSlice});
+  let message='Imported '+(result.files_imported||0)+' file(s) into Bambuddy.';
+  if(result.folder)message+='\nFolder: '+result.folder.name;
+  if(result.tags_assigned&&result.tags_assigned.length)message+='\nBambuddy tags: '+result.tags_assigned.join(', ');
+  if(result.tag_warning)message+='\nTag warning: '+result.tag_warning;
+  if(result.external_link_warning)message+='\nExternal link warning: '+result.external_link_warning;
+  if(result.failed_files&&result.failed_files.length)message+='\nFailed: '+result.failed_files.map(item=>item.filename+': '+item.error).join('; ');
+  if(result.slice_action&&result.slice_action.mode==='desktop'){openSlicerProtocol(result.slice_action.slicer_url);message+='\nOpening '+result.slice_action.slicer+' on this device.'}
+  else if(result.slice_action){message+='\nSlice job '+(result.slice_action.job_id||'queued')+' queued in Bambuddy’s '+result.slice_action.slicer+' sidecar.'}
+  if(result.slice_error)message+='\nSlice could not start: '+result.slice_error;
+  showStatus('resolveStatus',message,result.files_imported===0);$('importSelected').textContent='Save';updateSelection();
+  const first=result.imported_files&&result.imported_files[0]&&result.imported_files[0].id;
+  if(first&&result.file_manager_url){const link=document.createElement('a');link.href=result.file_manager_url;link.textContent='Open saved file in Bambuddy File Manager';link.style.display='inline-block';link.style.marginTop='8px';$('resolveStatus').append(document.createElement('br'),link)}
+  if(result.slice_action&&result.slice_action.mode==='desktop'){const fallback=document.createElement('a');fallback.href=result.slice_action.slicer_url;fallback.textContent='If it did not open, click to launch '+result.slice_action.slicer;fallback.style.display='inline-block';fallback.style.marginTop='8px';$('resolveStatus').append(document.createElement('br'),fallback)}
+  renderHistory();
+ }catch(e){sliceAfterSave=false;showStatus('resolveStatus',e.message,true);$('importSelected').textContent='Retry save';updateSelection()}
+};
+$('directImport').onclick=async()=>{const url=$('directUrl').value.trim();if(!url)return showStatus('directStatus','Paste a direct HTTPS file URL first.',true);$('directImport').disabled=true;try{const result=await api('/api/import-direct',{url});let message='Imported '+(result.filename||'file')+' into Bambuddy.';if(result.tag_warning)message+='\nTag warning: '+result.tag_warning;if(result.external_link_warning)message+='\nExternal link warning: '+result.external_link_warning;showStatus('directStatus',message)}catch(e){showStatus('directStatus',e.message,true)}finally{$('directImport').disabled=false}};
 </script></body></html>'''
-

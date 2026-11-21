@@ -1,6 +1,8 @@
 # Bambuddy Model Importer Extension
 
-This release packages the browser extension inside a top-level `bambuddy-model-importer/` folder, so extracting the ZIP here keeps the extension files together.
+Version 1.1.0 adds Shapekit and MakerWorld to supported source discovery. MakerWorld downloads continue through Bambuddy's built-in Model Sources API and require its cloud access permission and active Bambu Cloud login.
+
+The release ZIP now contains a top-level `bambuddy-model-importer/` folder so extracting it does not scatter extension files into the current directory.
 
 See the [extension README](https://github.com/Rupp3r/bambuddy-model-importer/blob/main/extension/README.md) for installation, setup, permissions and compatibility details.
 

@@ -9,6 +9,8 @@ It adds a one-click entry point from supported model pages. The extension reads 
 The extension delegates source detection and downloads to the importer backend. It supports the same sources as the installed importer version:
 
 - Printables (public/free files)
+- Shapekit public model pages
+- MakerWorld plates through Bambuddy's built-in Model Sources API; the Bambuddy key must have **Allow cloud access**, and its owner must have an active Bambu Cloud login stored in Bambuddy
 - NASA 3D Resources
 - NIH 3D
 - Smithsonian 3D
@@ -22,13 +24,13 @@ The backend decides whether a URL and its files are supported. Updating the impo
 ## Install
 
 1. Download the latest `bambuddy-model-importer-extension-vX.Y.Z.zip` from the repository's [Releases](https://github.com/Rupp3r/bambuddy-model-importer/releases).
-2. Extract the ZIP to a folder.
+2. Extract the ZIP. It contains a top-level `bambuddy-model-importer/` folder. For an update, extract into the same parent folder as the existing `bambuddy-model-importer` directory and allow the files to be overwritten.
 3. Open `chrome://extensions` (or the equivalent extensions page in another Chromium browser).
 4. Enable **Developer mode**.
 5. Choose **Load unpacked** and select the extracted extension folder.
 6. Click the extension icon and open **Settings**.
 
-This is a manually installed extension package, not a Chrome Web Store listing. Updates are installed by downloading the newer release ZIP and reloading/replacing the unpacked extension folder.
+This is a manually installed extension package, not a Chrome Web Store listing. After extracting an update over the existing folder, return to `chrome://extensions` and reload the extension.
 
 ## Configure
 
@@ -49,7 +51,7 @@ To revoke extension sessions, change `IMPORTER_PASSWORD` in the importer deploym
 4. Select one or more files.
 5. Click **Import selected files**.
 
-When several files are selected, the importer creates a Bambuddy subfolder named after the model. Source tags are applied by the importer when available. Direct file URLs are imported through the same server-side downloader.
+When several files are selected, the importer creates a Bambuddy subfolder named after the model. Source tags and the source URL tag are applied by the importer when Bambuddy's tag-name limit allows it; the original model page is also stored in each file's External link field. Direct file URLs are imported through the same server-side downloader.
 
 ## Permissions and privacy
 

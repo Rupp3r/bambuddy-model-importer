@@ -23,6 +23,10 @@ from app import (
     parse_thingiverse_id,
     parse_wikimedia_title,
     normalize_source_tags,
+    source_url_tags,
+    is_sliceable_filename,
+    first_slicer_preset_refs,
+    desktop_slicer_url,
     needs_model_folder,
     safe_filename,
     safe_folder_name,
@@ -192,6 +196,107 @@ class SourceUrlParsingTests(unittest.TestCase):
 
 
 class ImportOrganizationTests(unittest.TestCase):
+    def test_source_url_tag_matches_short_source_link(self):
+        self.assertEqual(source_url_tags("https://shapekit.cc/bird-feeder"), [
+            "Source: https://shapekit.cc/bird-feeder",
+        ])
+
+    def test_long_source_url_falls_back_to_source_tag_with_exact_link_when_it_fits(self):
+        url = "https://example.com/" + "x" * 40
+        self.assertEqual(source_url_tags(url), ["Source", url])
+
+    def test_source_tag_respects_bambuddy_tag_length_limit(self):
+        self.assertEqual(source_url_tags("https://example.com/" + "x" * 80), ["Source"])
+
+    def test_only_unsliced_stl_and_3mf_are_sliceable(self):
+        self.assertTrue(is_sliceable_filename("bird feeder.stl"))
+        self.assertTrue(is_sliceable_filename("bird feeder.3mf"))
+        self.assertFalse(is_sliceable_filename("bird feeder.gcode"))
+        self.assertFalse(is_sliceable_filename("bird feeder.gcode.3mf"))
+
+    def test_default_slice_presets_follow_bambuddy_tier_order(self):
+        self.assertEqual(first_slicer_preset_refs({
+            "local": {"printer": [{"id": 1}], "process": [], "filament": []},
+            "orca_cloud": {"printer": [{"id": "orca"}], "process": [], "filament": []},
+            "cloud": {"printer": [], "process": [{"id": 2}], "filament": []},
+            "standard": {"printer": [], "process": [], "filament": [{"id": 3}]},
+        }), {
+            "printer": {"source": "local", "id": "1"},
+            "process": {"source": "cloud", "id": "2"},
+            "filament": {"source": "standard", "id": "3"},
+        })
+
+    def test_desktop_slicer_url_uses_configured_protocol_and_encodes_filename(self):
+        with patch.object(importer, "BAMBUDDY_URL", "http://bambuddy:8756/"):
+            link = desktop_slicer_url(42, "short-token", "bird feeder.3mf", "orcaslicer")
+        self.assertTrue(link.startswith("orcaslicer://open?file="))
+        self.assertIn("%2520", link)
+
+    def test_history_actions_stay_in_the_importer_tab_and_no_fake_slice_query_remains(self):
+        self.assertNotIn("target='_blank'", importer.HTML)
+        self.assertNotIn("&slice=1", importer.HTML)
+
+    def test_bambustudio_macos_protocol_is_used(self):
+        with patch.object(importer, "BAMBUDDY_URL", "http://bambuddy:8756"):
+            link = desktop_slicer_url(42, "token", "bird.3mf", "bambu_studio", "Mozilla Mac")
+        self.assertTrue(link.startswith("bambustudioopen://"))
+
+    def test_sidecar_history_action_queues_with_bambuddy_default_slicer_settings(self):
+        class Response:
+            def __init__(self, payload, status_code=200):
+                self.payload = payload
+                self.status_code = status_code
+                self.text = ""
+            def json(self):
+                return self.payload
+
+        calls = []
+        replies = [
+            Response({"use_slicer_api": True, "preferred_slicer": "orcaslicer"}),
+            Response({"filename": "bird.3mf"}),
+            Response({
+                "local": {"printer": [{"id": 10}], "process": [{"id": 20}], "filament": [{"id": 30}]},
+                "orca_cloud": {"printer": [], "process": [], "filament": []},
+                "cloud": {"printer": [], "process": [], "filament": []},
+                "standard": {"printer": [], "process": [], "filament": []},
+            }),
+            Response({"job_id": 123, "status": "queued"}, 202),
+        ]
+        async def fake_request(method, path, **kwargs):
+            calls.append((method, path, kwargs))
+            return replies.pop(0)
+
+        with patch.object(importer, "bambuddy_request", side_effect=fake_request):
+            action = asyncio.run(importer.prepare_slicer_action(42))
+
+        self.assertEqual(action, {"mode": "sidecar", "slicer": "orcaslicer", "job_id": 123, "status": "queued"})
+        self.assertEqual(calls[-1][1], "/library/files/42/slice")
+        self.assertEqual(calls[-1][2]["json"]["printer_preset"], {"source": "local", "id": "10"})
+
+    def test_desktop_history_action_uses_bambuddy_slicer_token(self):
+        class Response:
+            def __init__(self, payload):
+                self.payload = payload
+                self.status_code = 200
+                self.text = ""
+            def json(self):
+                return self.payload
+
+        calls = []
+        replies = [Response({"use_slicer_api": False, "preferred_slicer": "orcaslicer"}),
+                   Response({"filename": "bird feeder.stl"}), Response({"token": "short-lived"})]
+        async def fake_request(method, path, **kwargs):
+            calls.append((method, path, kwargs))
+            return replies.pop(0)
+
+        with patch.object(importer, "BAMBUDDY_URL", "http://bambuddy:8756"), \
+             patch.object(importer, "bambuddy_request", side_effect=fake_request):
+            action = asyncio.run(importer.prepare_slicer_action(42, "Windows"))
+
+        self.assertEqual(action["mode"], "desktop")
+        self.assertTrue(action["slicer_url"].startswith("orcaslicer://open?file="))
+        self.assertEqual(calls[-1][1], "/library/files/42/slicer-token")
+
     def test_import_history_persists_file_and_source_links(self):
         with tempfile.TemporaryDirectory() as directory:
             with patch.object(importer, "HISTORY_DB", Path(directory) / "history.sqlite3"):
@@ -285,4 +390,3 @@ class RememberedSessionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

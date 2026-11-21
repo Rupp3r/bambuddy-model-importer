@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Bambuddy Model Importer",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "Send models from supported public 3D model sites to your self-hosted Bambuddy Model Importer.",
   "permissions": [
     "storage",

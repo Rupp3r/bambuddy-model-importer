@@ -47,6 +47,12 @@ class ExtensionApiContractTests(unittest.TestCase):
         available = set(importer.EXTENSION_API_CONTRACT["features"])
         self.assertTrue({"multi-file-folders", "source-tags", "direct-file-import"}.issubset(available))
 
+    def test_shared_contract_advertises_shapekit_and_bambuddy_makerworld(self):
+        sources = {source["id"]: source for source in importer.EXTENSION_API_CONTRACT["sources"]}
+        self.assertIn("shapekit.cc", sources["shapekit"]["hosts"])
+        self.assertIn("makerworld.com", sources["makerworld"]["hosts"])
+        self.assertIn("Bambu Cloud login", sources["makerworld"]["requirement"])
+
 
 if __name__ == "__main__":
     unittest.main()
