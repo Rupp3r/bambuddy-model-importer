@@ -238,6 +238,7 @@ class ImportOrganizationTests(unittest.TestCase):
         self.assertNotIn("&slice=1", importer.HTML)
         self.assertIn("fileAction.target='_self'", importer.HTML)
         self.assertIn("openHistoryFile(x.file_url,feedback)", importer.HTML)
+        self.assertIn("space===pageSpace", importer.HTML)
         self.assertIn("targetAddressSpace:space", importer.HTML)
         self.assertIn("openSliceDialog(x.file_id", importer.HTML)
         self.assertIn('id="slicePrinter"', importer.HTML)
