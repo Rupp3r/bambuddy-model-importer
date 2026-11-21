@@ -89,7 +89,9 @@ jobs:
           version="$(python -c 'import json; print(json.load(open("extension/manifest.json"))["version"])')"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           asset="bambuddy-model-importer-extension-v${version}.zip"
-          (cd extension && zip -qr "../$asset" .)
+          mkdir -p package/bambuddy-model-importer
+          cp -R extension/. package/bambuddy-model-importer/
+          (cd package && zip -qr "../$asset" bambuddy-model-importer)
           echo "asset=$asset" >> "$GITHUB_OUTPUT"
 
       - name: Check that the extension version has not already been released
