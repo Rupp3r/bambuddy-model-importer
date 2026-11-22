@@ -1980,9 +1980,9 @@ async function renderHistory(){
    const img=document.createElement('img');img.src=x.thumbnail_url;img.alt=x.title;img.loading='lazy';img.onerror=()=>{img.style.display='none'};
    const body=document.createElement('div');body.className='history-card-body';
    const title=document.createElement('strong');title.textContent=x.title||x.filename;
-   const file=document.createElement('div');const fileLink=document.createElement('a');fileLink.href=x.file_url;fileLink.target='_self';fileLink.textContent=x.filename;file.append(fileLink);
+   const file=document.createElement('div');const fileLink=document.createElement('a');fileLink.href=x.file_url;fileLink.target='_top';fileLink.textContent=x.filename;file.append(fileLink);
    const actions=document.createElement('div');actions.className='history-actions';
-   const fileAction=document.createElement('a');fileAction.href=x.file_url;fileAction.target='_self';fileAction.textContent='▤ File';actions.append(fileAction);
+   const fileAction=document.createElement('a');fileAction.href=x.file_url;fileAction.target='_top';fileAction.textContent='▤ File';actions.append(fileAction);
    const slice=document.createElement('button');slice.type='button';slice.textContent='▶ Slice';slice.disabled=!x.can_slice;slice.title=x.can_slice?'Use Bambuddy’s configured slicer':'Only unsliced STL and 3MF files can be sliced';
    const feedback=document.createElement('small');feedback.className='history-feedback';
    slice.onclick=()=>openSliceDialog(x.file_id,x.filename,feedback,slice);actions.append(slice);

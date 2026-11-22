@@ -236,7 +236,7 @@ class ImportOrganizationTests(unittest.TestCase):
     def test_history_actions_stay_in_the_importer_tab_and_no_fake_slice_query_remains(self):
         self.assertNotIn("target='_blank'", importer.HTML)
         self.assertNotIn("&slice=1", importer.HTML)
-        self.assertIn("fileAction.target='_self'", importer.HTML)
+        self.assertIn("fileAction.target='_top'", importer.HTML)
         self.assertNotIn("fileAction.onclick", importer.HTML)
         self.assertIn("fileAction.href=x.file_url", importer.HTML)
         self.assertIn("openSliceDialog(x.file_id", importer.HTML)
